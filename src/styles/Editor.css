@@ -1,0 +1,267 @@
+/* Editor Page Layout */
+.editor-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background-color: #1a1a1a;
+}
+
+/* Title Bar */
+.editor-title-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  background-color: #1a1a1a;
+  border-bottom: 1px solid #2d2d2d;
+}
+
+.title-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.title-bar-right {
+  display: flex;
+  align-items: center;
+}
+
+.back-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  background-color: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #ccc;
+  font-size: 12px;
+  font-family: monospace;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-width: 40px;
+}
+
+.back-button:hover {
+  background-color: #3d3d3d;
+  border-color: #4d94ff;
+}
+
+.editor-title-bar h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  color: #ffffff;
+}
+
+.note-name {
+  font-size: 16px;
+  color: #999;
+  font-style: italic;
+}
+
+/* Toolbar */
+.editor-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 24px;
+  background-color: #2d2d2d;
+  border-bottom: 1px solid #3d3d3d;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+}
+
+/* Font and Size Selectors */
+.font-selector,
+.font-size-selector {
+  padding: 6px 12px;
+  background-color: #1a1a1a;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.font-selector:hover,
+.font-size-selector:hover {
+  border-color: #4d94ff;
+}
+
+.font-selector:focus,
+.font-size-selector:focus {
+  outline: none;
+  border-color: #4d94ff;
+  box-shadow: 0 0 0 2px rgba(77, 148, 255, 0.1);
+}
+
+.font-selector {
+  min-width: 100px;
+}
+
+.font-size-selector {
+  min-width: 60px;
+}
+
+/* Color Picker */
+.color-picker-container {
+  display: flex;
+  align-items: center;
+}
+
+.color-picker {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid #3d3d3d;
+  cursor: pointer;
+  background: transparent;
+  transition: all 0.15s ease;
+}
+
+.color-picker:hover {
+  border-color: #4d94ff;
+  transform: scale(1.05);
+}
+
+/* Formatting Buttons */
+.formatting-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.format-btn {
+  padding: 8px 12px;
+  background-color: #1a1a1a;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.format-btn:hover {
+  background-color: #2d2d2d;
+  border-color: #4d94ff;
+}
+
+.format-btn:active,
+.format-btn.active {
+  background-color: #4d94ff;
+  border-color: #4d94ff;
+  color: #ffffff;
+}
+
+.format-btn.strikethrough {
+  font-size: 12px;
+}
+
+/* Word Count */
+.word-count {
+  padding: 6px 12px;
+  background-color: #1a1a1a;
+  border-radius: 6px;
+  color: #999;
+  font-size: 14px;
+  border: 1px solid #3d3d3d;
+}
+
+/* Editor Container */
+.editor-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Command Menu */
+.command-menu {
+  background-color: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.command-menu ul {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+}
+
+.command-menu li {
+  padding: 6px 12px;
+  color: #e0e0e0;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.command-menu li:hover {
+  background-color: #3d3d3d;
+}
+
+/* Status Bar */
+.editor-status-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 24px;
+  background-color: #2d2d2d;
+  border-top: 1px solid #3d3d3d;
+  color: #999;
+  font-size: 13px;
+}
+
+.status-left,
+.status-right {
+  display: flex;
+  align-items: center;
+}
+
+/* Make sure CodeMirror uses the full available space */
+.editor-container .cm-editor {
+  height: 100% !important;
+}
+
+.editor-container .cm-scroller {
+  font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .editor-toolbar {
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .toolbar-left {
+    gap: 12px;
+  }
+
+  .formatting-buttons {
+    gap: 6px;
+  }
+
+  .format-btn {
+    padding: 6px 10px;
+    min-width: 32px;
+  }
+}
