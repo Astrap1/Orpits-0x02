@@ -44,8 +44,6 @@ function ItemsList({ items, onSelectItem, onNavigateBack }: ItemsListProps) {
     if (isCreating) {
       if (e.key === "Enter") {
         e.preventDefault();
-        // TODO: Create the item and add to list
-        console.log(`Creating ${creatingType}: ${creatingName}`);
         setIsCreating(false);
         setCreatingName("");
         setCreatingType(null);

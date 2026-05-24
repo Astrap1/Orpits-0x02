@@ -1,98 +1,161 @@
+export interface CommandActionContext {
+  setFontSize: (size: string) => void;
+  setSelectedFont: (font: string) => void;
+  setBold: (enabled: boolean) => void;
+  setItalic: (enabled: boolean) => void;
+  setStrike: (enabled: boolean) => void;
+  setUnderline: (enabled: boolean) => void;
+}
+
+interface Command {
+  name: string;
+  description: string;
+  action: (context: CommandActionContext, argument?: string) => boolean;
+}
+
+const setFontSizeCommand = (font: string, size: number) => {
+  return ({ setFontSize, setSelectedFont }: CommandActionContext) => {
+    setSelectedFont(font);
+    setFontSize(String(size));
+    return true;
+  };
+};
+
+const resetTextStyle = ({
+  setBold,
+  setFontSize,
+  setItalic,
+  setSelectedFont,
+  setStrike,
+  setUnderline
+}: CommandActionContext) => {
+  setSelectedFont("Body");
+  setFontSize("12");
+  setBold(false);
+  setItalic(false);
+  setStrike(false);
+  setUnderline(false);
+  return true;
+};
+
+const notImplemented = () => false;
+
 // Central registry for all keyboard-driven actions
-export const CommandRegistry = [
+export const CommandRegistry: Command[] = [
   {
     name: "table",
     description: "Insert a 1x1 grid",
-    action: () => console.log("Logic for Feature 1/4 goes here")
+    action: notImplemented
   },
   {
     name: "code",
     description: "Create a sandboxed code block",
-    action: () => console.log("Logic for Feature 2 goes here")
+    action: notImplemented
   },
   {
     name: "title",
     description: "Change font size",
-    action: () => console.log(`Changing font to ${16}`)
+    action: setFontSizeCommand("Title", 24)
   },
   {
     name: "header",
     description: "Change font size",
-    action: () => console.log(`Changing font to ${14}`)
+    action: setFontSizeCommand("Header", 16)
   },
   {
     name: "body",
     description: "Change font size",
-    action: () => console.log(`Changing font to ${12}`)
+    action: setFontSizeCommand("Body", 12)
   },
   {
     name: "font",
     description: "Change font size",
-    action: (size: string) => console.log(`Changing font to ${size}`)
+    action: ({ setFontSize }, size) => {
+      if (!size) return false;
+      setFontSize(size);
+      return true;
+    }
   },
   {
     name: "bold",
     description: "Make text bold",
-    action: () => console.log("Logic for bold text")
+    action: ({ setBold }) => {
+      setBold(true);
+      return true;
+    }
   },
   {
     name: "italic",
     description: "Make text italic",
-    action: () => console.log("Logic for italic text")
+    action: ({ setItalic }) => {
+      setItalic(true);
+      return true;
+    }
   },
   {
     name: "strike",
     description: "Strike-through text",
-    action: () => console.log("Logic for strike-through")
+    action: ({ setStrike }) => {
+      setStrike(true);
+      return true;
+    }
   },
   {
     name: "underline",
     description: "Underline text",
-    action: () => console.log("Logic for underline")
+    action: ({ setUnderline }) => {
+      setUnderline(true);
+      return true;
+    }
+  },
+  {
+    name: "default",
+    description: "Return to normal text",
+    action: resetTextStyle
   },
   {
     name: "color",
     description: "Change the text colour",
-    action: (color: string) => console.log(`Changing color to ${color}`)
+    action: notImplemented
   },
   {
     name: "bulletlist",
     description: "Create a bullet point",
-    action: () => console.log("Logic for butllet point")
+    action: notImplemented
   },
   {
     name: "numberlist",
     description: "Create a number list",
-    action: () => console.log("Logic for number list")
+    action: notImplemented
   },
   {
     name: "linebreak",
     description: "Insert a linebreak",
-    action: () => console.log("Logic for linebreak")
+    action: notImplemented
   },
   {
     name: "date",
     description: "Insert the date",
-    action: () => console.log("Logic for date")
+    action: notImplemented
   },
   {
     name: "time",
     description: "Insert the time",
-    action: () => console.log("Logic for time")
+    action: notImplemented
   },
   {
     name: "wordcount",
     description: "Insert the wordcount",
-    action: () => console.log("Logic for wordcount")
+    action: notImplemented
   },
   {
     name: "Save",
     description: "Save note",
-    action: () => console.log("Logic for saving note")
+    action: notImplemented
   },
   {
     name: "Export",
     description: "Export note",
-    action: () => console.log("Logic for exporting note")
+    action: notImplemented
   }
 ];

@@ -56,7 +56,6 @@ function StartPage() {
         onSelectItem={(item) => {
           if (item.type === "folder") {
             // TODO: Navigate to folder view
-            console.log("Would navigate to folder:", item.id);
           } else {
             // Navigate to editor
             navigate(`/editor/${item.id}`);
@@ -64,7 +63,6 @@ function StartPage() {
         }}
         onNavigateBack={() => {
           // TODO: Go back to parent folder
-          console.log("Navigate back");
         }}
       />
 
