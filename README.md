@@ -58,6 +58,63 @@ Fuzzy Search (21 Jul - 27 Jul)
 - A keyboard-only interface lives or dies by its search capability. Fuse.js provides a lightweight, zero-dependency fuzzy search algorithm. This ensures that when a user triggers the command menu, the list filters instantaneously, maintaining the "flow state" of a power user.
 5. OpenAI API
 - Building the \\<prompt> integration requires a reliable LLM backend. Using an established API allows the engineering focus to remain on complex UX challenges, such as asynchronous streaming and graceful degradation, rather than model hosting.
+6. React 19
+- To build the editor's frontend interface as reusable UI components, such as the start page, editor page, toolbar, command menu, and status bar. Its state management is useful for tracking live editor settings like bold, italic, underline, strikethrough, selected font style, font size, and command menu visibility.
+7. TypeScript 
+- TypeScript adds static type checking on top of JavaScript, which helps reduce bugs as the command system grows more complex. 
+8. CSS
+- To define the visual design and layout of the application, including the dark editor theme, title bar, toolbar, formatting buttons, command menu, editor container, and status bar.
+
+# Current Milestone Objectives
+For the current milestone, our main objective is to build the foundation of the note-taking editor before adding more advanced command, AI, code execution, and table features. This milestone focuses on proving that the editor can support a keyboard-first workflow and basic rich text formatting.
+
+The milestone objectives are:
+- Build a working desktop editor screen using the Tauri, React, TypeScript, and CodeMirror stack.
+- Create the general UI layout for the editor, including a title bar, toolbar, main writing area, and status bar.
+- Implement a basic text editor that users can type into continuously.
+- Support early formatting commands through the `//` command pattern.
+- Implement text style commands for title, header, body, bold, italic, strikethrough, and underline.
+- Set up a command registry so future commands can be added in one place.
+
+# Current Milestone Progress
+In this milestone, we completed the first usable version of the editor interface. The editor supports typing into a CodeMirror-based writing area. Users can apply formatting using toolbar controls, and some formatting can also be triggered through typed commands. The current implemented `//` commands include:
+- `//title` to switch to title-sized text
+- `//header` to switch to header-sized text
+- `//body` to return to body-sized text
+- `//bold` to enable bold text
+- `//italic` to enable italic text
+- `//strike` to enable strikethrough text
+- `//underline` to enable underlined text
+- `//default` to reset text formatting
+This gives us an early proof of concept for the "CLI within a Doc" idea. Instead of relying only on mouse-based toolbar actions, users can begin controlling the editor by typing commands directly into the document.
+
+# Software Engineering Evidence
+1. Modular frontend structure
+- The project separates pages, components, styles, and command logic into different files. This makes the editor easier to maintain as more features are added.
+2. Central command registry
+- Keyboard commands are stored in `src/CommandRegistry.ts` instead of being hardcoded throughout the editor. This makes it easier to add, test, and update commands such as `//table`, `//code`, and future AI prompts.
+3. Incremental feature delivery
+- The project is split into milestones and features. We are building the editor foundation first, then adding commands, AI, code boxes, tables, and fuzzy search in later stages.
+
+# Next Milestone Objectives
+For the next milestone, we plan to expand the `//` command system from basic formatting into a more complete command workflow.
+
+The next milestone objectives are:
+- Improve the command menu so it can filter and suggest commands as the user types.
+- Implement more `//` commands, such as list creation, line breaks, inserting date/time, word count insertion, save, and export.
+- Begin implementing table creation commands.
+- Add persistence for notes, including saving and loading `.x2pad` files.
+- Improve error handling for invalid or incomplete commands.
+- Add basic tests or manual QA checklists for editor typing, command execution, and formatting behaviour.
+- Refine the UI based on feedback from testing the current editor prototype.
+
+# Challenges Faced
+1. Balancing keyboard-first design with discoverability
+- A command-based editor is fast for experienced users, but new users still need clear suggestions so they do not have to memorise every command.
+2. Managing editor state correctly
+- Formatting commands need to affect newly typed text without unexpectedly changing existing text. This requires careful handling of editor state, cursor position, and text decorations.
+3. Avoiding conflicts between normal typing and commands
+- Since commands are typed directly into the document, the editor must distinguish between normal text and intentional commands like `//bold` or `//code`.
 
 # Test & Quality Assurance Ideas
 1. Sandboxing

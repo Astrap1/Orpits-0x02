@@ -1,17 +1,47 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import type { KeyboardEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
-import { Prec, StateEffect, StateField } from "@codemirror/state";
+import { Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap } from "@codemirror/view";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CommandRegistry } from "../CommandRegistry";
 import "../styles/Editor.css";
 
-const DEFAULT_FONT_SIZE = "12";
+const DEFAULT_FONT_SIZE = "14";
 const COMMANDS_WITH_ARGUMENTS = new Set(["color", "font"]);
+
+const notes = [
+  {
+    id: "sample-note",
+    title: "Sample Note",
+    updatedAt: "Today",
+    content:
+      "Welcome to x2pad.\n\nType //title, //header, //body, //bold, //italic, or //color cyan and press Enter to change the writing style.\n\n// color cyan\nThis line is a custom registry command, so it gets its own visual language."
+  },
+  {
+    id: "second-sample-note",
+    title: "Second Sample Note",
+    updatedAt: "Just now",
+    content:
+      "This is a second sample note.\n\nUse it to test switching between notes from the Vault sidebar while keeping the editor aligned like a normal writing surface."
+  }
+];
+
+const colorValues: Record<string, string> = {
+  Blue: "#7aa2ff",
+  Cyan: "#67e8f9",
+  Green: "#8ee6a8",
+  Purple: "#c4a7ff",
+  Red: "#ff8f9b",
+  White: "#f7f2ff",
+  Yellow: "#f5d76e"
+};
 
 interface ActiveTextStyle {
   fontSize: string;
+  textColor: string;
   isBold: boolean;
   isItalic: boolean;
   isStrike: boolean;
@@ -24,8 +54,13 @@ const addTextStyleDecoration = StateEffect.define<{
   style: ActiveTextStyle;
 }>();
 
+const getResolvedColor = (color: string) => colorValues[color] ?? color;
+
 const getTextStyleAttribute = (style: ActiveTextStyle) => {
-  const styles = [`font-size: ${style.fontSize}px;`];
+  const styles = [
+    `font-size: ${style.fontSize}px;`,
+    `color: ${getResolvedColor(style.textColor)};`
+  ];
   const textDecorations = [];
 
   if (style.isBold) {
@@ -81,6 +116,35 @@ const textStyleDecorations = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field)
 });
 
+function buildCommandLineDecorations(doc: Text) {
+  const builder = new RangeSetBuilder<Decoration>();
+
+  for (let index = 1; index <= doc.lines; index += 1) {
+    const line = doc.line(index);
+
+    if (line.text.trimStart().startsWith("//")) {
+      builder.add(line.from, line.from, Decoration.line({ class: "cm-command-line" }));
+      builder.add(line.from, line.to, Decoration.mark({ class: "cm-command-command" }));
+    }
+  }
+
+  return builder.finish();
+}
+
+const commandLineDecorations = StateField.define<DecorationSet>({
+  create(state) {
+    return buildCommandLineDecorations(state.doc);
+  },
+  update(decorations, transaction) {
+    if (transaction.docChanged) {
+      return buildCommandLineDecorations(transaction.state.doc);
+    }
+
+    return decorations.map(transaction.changes);
+  },
+  provide: (field) => EditorView.decorations.from(field)
+});
+
 function getCommandAtCursor(view: EditorView) {
   const selection = view.state.selection.main;
 
@@ -108,22 +172,91 @@ function getCommandAtCursor(view: EditorView) {
   };
 }
 
+function WindowControls() {
+  const isTauri = "__TAURI_INTERNALS__" in window;
+
+  const runWindowAction = async (action: "minimize" | "maximize" | "close") => {
+    if (!isTauri) return;
+
+    const appWindow = getCurrentWindow();
+
+    if (action === "minimize") {
+      await appWindow.minimize();
+    } else if (action === "maximize") {
+      await appWindow.toggleMaximize();
+    } else {
+      await appWindow.close();
+    }
+  };
+
+  return (
+    <div className="window-controls">
+      <button type="button" className="window-control" onClick={() => runWindowAction("minimize")} aria-label="Minimize">
+        <span />
+      </button>
+      <button type="button" className="window-control" onClick={() => runWindowAction("maximize")} aria-label="Maximize">
+        <span />
+      </button>
+      <button type="button" className="window-control close" onClick={() => runWindowAction("close")} aria-label="Close">
+        <span />
+      </button>
+    </div>
+  );
+}
+
 function Editor() {
   const navigate = useNavigate();
   const { noteId } = useParams();
+  const initialNote = notes.find((note) => note.id === noteId) ?? notes[0];
+  const editorViewRef = useRef<EditorView | null>(null);
 
-  const [value, setValue] = useState("Welcome to 0x02. Type // to begin.");
+  const [activeNoteId, setActiveNoteId] = useState(initialNote.id);
+  const [value, setValue] = useState(initialNote.content);
+  const [searchValue, setSearchValue] = useState("");
+  const [sidebarSelection, setSidebarSelection] = useState(1);
+  const [showLogoPane, setShowLogoPane] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
 
-  // Toolbar state
   const [selectedFont, setSelectedFont] = useState("Body");
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
-  const [textColor, setTextColor] = useState("#4d94ff");
+  const [textColor, setTextColor] = useState("Cyan");
   const [isBold, setBold] = useState(false);
   const [isItalic, setItalic] = useState(false);
   const [isStrike, setStrike] = useState(false);
   const [isUnderline, setUnderline] = useState(false);
+
+  const filteredNotes = useMemo(() => {
+    const query = searchValue.trim().toLowerCase();
+    if (!query) return notes;
+    return notes.filter((note) => note.title.toLowerCase().includes(query));
+  }, [searchValue]);
+
+  const activeNote = notes.find((note) => note.id === activeNoteId) ?? notes[0];
+
+  const setActiveNote = useCallback((noteIdToActivate: string, shouldNavigate = false) => {
+    const nextNote = notes.find((note) => note.id === noteIdToActivate);
+    if (!nextNote) return;
+
+    setActiveNoteId(nextNote.id);
+    setValue(nextNote.content);
+    setShowLogoPane(false);
+    setShowCommands(false);
+
+    requestAnimationFrame(() => {
+      editorViewRef.current?.dispatch({ selection: { anchor: 0 } });
+    });
+
+    if (shouldNavigate) {
+      navigate(`/editor/${nextNote.id}`);
+    }
+  }, [navigate]);
+
+  const showSearchPane = useCallback(() => {
+    setSidebarSelection(0);
+    setShowLogoPane(true);
+    setShowCommands(false);
+  }, []);
 
   const runCommandAtCursor = useCallback((view: EditorView) => {
     const pendingCommand = getCommandAtCursor(view);
@@ -150,6 +283,7 @@ function Editor() {
         setFontSize,
         setItalic,
         setSelectedFont,
+        setTextColor,
         setStrike,
         setUnderline
       },
@@ -174,6 +308,7 @@ function Editor() {
   const editorExtensions = useMemo(() => [
     markdown(),
     textStyleDecorations,
+    commandLineDecorations,
     Prec.highest(keymap.of([
       {
         key: "Enter",
@@ -197,6 +332,7 @@ function Editor() {
           to: toB,
           style: {
             fontSize,
+            textColor,
             isBold,
             isItalic,
             isStrike,
@@ -210,46 +346,115 @@ function Editor() {
       }
     }),
     EditorView.theme({
+      "&": {
+        backgroundColor: "transparent",
+        color: "#f2eefc"
+      },
       ".cm-content": {
+        caretColor: "#c4a7ff",
+        fontFamily: "'Inter', 'SF Pro Text', 'Segoe UI', sans-serif",
         fontSize: `${DEFAULT_FONT_SIZE}px`,
-        lineHeight: "1.5"
+        lineHeight: "1.72",
+        padding: "44px 0 80px"
+      },
+      ".cm-line": {
+        padding: "0 2px"
+      },
+      ".cm-cursor": {
+        borderLeftColor: "#d8b4fe"
+      },
+      ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+        backgroundColor: "rgba(168, 85, 247, 0.32)"
+      },
+      ".cm-scroller": {
+        backgroundColor: "transparent"
+      },
+      ".cm-gutters": {
+        display: "none"
       }
     })
-  ], [fontSize, isBold, isItalic, isStrike, isUnderline, runCommandAtCursor]);
+  ], [fontSize, textColor, isBold, isItalic, isStrike, isUnderline, runCommandAtCursor]);
 
-  // The "Input Interceptor" logic
   const onChange = useCallback((val: string, viewUpdate: any) => {
     setValue(val);
 
-    // Get cursor position to check what was just typed
     const state = viewUpdate.state;
     const cursor = state.selection.main.head;
     const line = state.doc.lineAt(cursor);
     const cursorOffset = cursor - line.from;
     const textBeforeCursor = line.text.slice(0, cursorOffset);
-    const isTypingCommand = /\/\/[a-z]*$/i.test(textBeforeCursor);
+    const isTypingCommand = /\/\/[a-z]*(?:\s+[^/\s]*)?$/i.test(textBeforeCursor);
 
     if (isTypingCommand) {
-      // Trigger the command menu
       setShowCommands(true);
 
-      // Basic logic to position the menu near the cursor
       const coords = viewUpdate.view.coordsAtPos(cursor);
       if (coords) {
-        setMenuPos({ top: coords.bottom, left: coords.left });
+        setMenuPos({ top: coords.bottom + 8, left: coords.left });
       }
     } else {
       setShowCommands(false);
     }
   }, []);
 
-  // Calculate word count
-  const wordCount = value.trim().split(/\s+/).filter(word => word.length > 0).length;
+  const styleIndicator = [
+    selectedFont,
+    `${fontSize}px`,
+    textColor,
+    isBold ? "B" : null,
+    isItalic ? "I" : null,
+    isUnderline ? "U" : null,
+    isStrike ? "S" : null
+  ].filter(Boolean).join(" · ");
 
-  // Handle Escape key to go back
+  const handleSidebarKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!["ArrowUp", "ArrowDown", "Home", "End", "Enter"].includes(event.key)) {
+      return;
+    }
+
+    event.preventDefault();
+    const maxSelection = filteredNotes.length;
+    let nextSelection = sidebarSelection;
+
+    if (event.key === "ArrowUp") {
+      nextSelection = Math.max(0, sidebarSelection - 1);
+    } else if (event.key === "ArrowDown") {
+      nextSelection = Math.min(maxSelection, sidebarSelection + 1);
+    } else if (event.key === "Home") {
+      nextSelection = 0;
+    } else if (event.key === "End") {
+      nextSelection = maxSelection;
+    }
+
+    if (event.key === "Enter" && sidebarSelection > 0) {
+      const selectedNote = filteredNotes[sidebarSelection - 1];
+      if (selectedNote) setActiveNote(selectedNote.id, true);
+      return;
+    }
+
+    setSidebarSelection(nextSelection);
+
+    if (nextSelection === 0) {
+      setShowLogoPane(true);
+      return;
+    }
+
+    const selectedNote = filteredNotes[nextSelection - 1];
+    if (selectedNote) {
+      setActiveNote(selectedNote.id);
+    }
+  };
+
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !showCommands) {
+    const noteIndex = filteredNotes.findIndex((note) => note.id === activeNoteId);
+    if (noteIndex >= 0 && !showLogoPane) {
+      setSidebarSelection(noteIndex + 1);
+    }
+  }, [activeNoteId, filteredNotes, showLogoPane]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !showCommands) {
         navigate("/");
       }
     };
@@ -259,148 +464,119 @@ function Editor() {
   }, [navigate, showCommands]);
 
   return (
-    <div className="editor-page">
-      {/* Title Bar */}
-      <div className="editor-title-bar">
-        <div className="title-bar-left">
-          <button className="back-button" onClick={() => navigate("/")} title="Back to notes (Esc)">
-            esc
-          </button>
-          <h1>x2pad</h1>
+    <div className="editor-shell">
+      <header className="app-title-bar" data-tauri-drag-region>
+        <div className="app-title" data-tauri-drag-region>
+          Orpits — x2pad
         </div>
-        <div className="title-bar-right">
-          <span className="note-name">{noteId || "Untitled"}</span>
-        </div>
-      </div>
+        <WindowControls />
+      </header>
 
-      {/* Toolbar */}
-      <div className="editor-toolbar">
-        <div className="toolbar-left">
-          {/* Font Selection */}
-          <select
-            className="font-selector"
-            value={selectedFont}
-            onChange={(e) => setSelectedFont(e.target.value)}
+      <div className="app-body">
+        <aside className="vault-sidebar" onKeyDown={handleSidebarKeyDown}>
+          <div className="vault-header">Vault</div>
+
+          <label
+            className={`vault-search ${sidebarSelection === 0 ? "selected" : ""}`}
+            onMouseEnter={showSearchPane}
           >
-            <option value="Body">Body</option>
-            <option value="Header">Header</option>
-            <option value="Title">Title</option>
-            <option value="Monospace">Monospace</option>
-          </select>
-
-          {/* Font Size */}
-          <select
-            className="font-size-selector"
-            value={fontSize}
-            onChange={(e) => setFontSize(e.target.value)}
-          >
-            <option value="10">10</option>
-            <option value="11">11</option>
-            <option value="12">12</option>
-            <option value="14">14</option>
-            <option value="16">16</option>
-            <option value="18">18</option>
-            <option value="20">20</option>
-            <option value="24">24</option>
-          </select>
-
-          {/* Color Picker */}
-          <div className="color-picker-container">
+            <span className="search-glyph" aria-hidden="true" />
             <input
-              type="color"
-              className="color-picker"
-              value={textColor}
-              onChange={(e) => setTextColor(e.target.value)}
+              type="text"
+              value={searchValue}
+              placeholder="Search notes"
+              onChange={(event) => setSearchValue(event.target.value)}
+              onFocus={showSearchPane}
             />
+          </label>
+
+          <nav className="notes-nav" aria-label="Notes">
+            {filteredNotes.map((note, index) => {
+              const selectionIndex = index + 1;
+              const isSelected = sidebarSelection === selectionIndex;
+              const isActive = activeNoteId === note.id && !showLogoPane;
+
+              return (
+                <button
+                  type="button"
+                  className={`note-link ${isSelected || isActive ? "active" : ""}`}
+                  key={note.id}
+                  onMouseEnter={() => {
+                    setSidebarSelection(selectionIndex);
+                    setActiveNote(note.id);
+                  }}
+                  onFocus={() => {
+                    setSidebarSelection(selectionIndex);
+                    setActiveNote(note.id);
+                  }}
+                  onClick={() => setActiveNote(note.id, true)}
+                >
+                  <span className="note-link-title">{note.title}</span>
+                  <span className="note-link-meta">{note.updatedAt}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="flow-status">
+            <span>Flow Mode</span>
+            <strong>Mouse optional · shortcuts optional</strong>
+          </div>
+        </aside>
+
+        <main className="editor-main">
+          <div className="note-status-bar">
+            <a className="note-title-anchor" href={`#/editor/${activeNote.id}`} tabIndex={-1}>
+              {showLogoPane ? "Search" : activeNote.title}
+            </a>
+            <div className="style-status">
+              <span>{styleIndicator}</span>
+              <span className="saved-dot" aria-label="Saved" />
+            </div>
           </div>
 
-          {/* Formatting Buttons */}
-          <div className="formatting-buttons">
-            <button
-              className={`format-btn ${isBold ? "active" : ""}`}
-              title="Bold"
-              onClick={() => setBold((enabled) => !enabled)}
-            >
-              <strong>B</strong>
-            </button>
-            <button
-              className={`format-btn ${isItalic ? "active" : ""}`}
-              title="Italic"
-              onClick={() => setItalic((enabled) => !enabled)}
-            >
-              <em>I</em>
-            </button>
-            <button
-              className={`format-btn ${isUnderline ? "active" : ""}`}
-              title="Underline"
-              onClick={() => setUnderline((enabled) => !enabled)}
-            >
-              <u>U</u>
-            </button>
-            <button
-              className={`format-btn strikethrough ${isStrike ? "active" : ""}`}
-              title="Strikethrough"
-              onClick={() => setStrike((enabled) => !enabled)}
-            >
-              <span style={{ textDecoration: 'line-through' }}>abc</span>
-            </button>
-          </div>
-        </div>
+          <section className={`editor-stage ${showLogoPane ? "logo-mode" : ""}`}>
+            {showLogoPane ? (
+              <div className="logo-empty-state" aria-label="x2pad">
+                <img src="/x2pad-logo.png" alt="" />
+              </div>
+            ) : (
+              <CodeMirror
+                value={value}
+                height="100%"
+                theme="dark"
+                extensions={editorExtensions}
+                onChange={onChange}
+                onCreateEditor={(view) => {
+                  editorViewRef.current = view;
+                }}
+                basicSetup={{
+                  lineNumbers: false,
+                  foldGutter: false,
+                  highlightActiveLine: false,
+                  highlightActiveLineGutter: false
+                }}
+              />
+            )}
 
-        <div className="toolbar-right">
-          {/* Word/Character Count */}
-          <div className="word-count">
-            Count: {wordCount}
-          </div>
-        </div>
-      </div>
-
-      {/* Editor Area */}
-      <div className="editor-container">
-        <CodeMirror
-          value={value}
-          height="100%"
-          theme="dark"
-          extensions={editorExtensions}
-          onChange={onChange}
-          basicSetup={{
-            lineNumbers: false,
-            foldGutter: false,
-          }}
-        />
-
-        {/* Command Menu */}
-        {showCommands && (
-          <div
-            className="command-menu"
-            style={{
-              position: 'absolute',
-              top: menuPos.top,
-              left: menuPos.left,
-              background: '#2d2d2d',
-              border: '1px solid #444',
-              padding: '10px',
-              zIndex: 1000,
-              color: 'white'
-            }}
-          >
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-              {CommandRegistry.map(cmd => (
-                <li key={cmd.name}>// {cmd.name} - {cmd.description}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-
-      {/* Status Bar */}
-      <div className="editor-status-bar">
-        <div className="status-left">
-          <span>Total Pages: 1</span>
-        </div>
-        <div className="status-right">
-          <span>Saved: 2 min ago</span>
-        </div>
+            {showCommands && (
+              <div
+                className="command-menu"
+                style={{
+                  top: menuPos.top,
+                  left: menuPos.left
+                }}
+              >
+                {CommandRegistry.map((command) => (
+                  <div className="command-menu-item" key={command.name}>
+                    <code>// {command.name}</code>
+                    <span>{command.description}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </main>
       </div>
     </div>
   );

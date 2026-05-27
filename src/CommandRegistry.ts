@@ -1,6 +1,7 @@
 export interface CommandActionContext {
   setFontSize: (size: string) => void;
   setSelectedFont: (font: string) => void;
+  setTextColor: (color: string) => void;
   setBold: (enabled: boolean) => void;
   setItalic: (enabled: boolean) => void;
   setStrike: (enabled: boolean) => void;
@@ -26,11 +27,13 @@ const resetTextStyle = ({
   setFontSize,
   setItalic,
   setSelectedFont,
+  setTextColor,
   setStrike,
   setUnderline
 }: CommandActionContext) => {
   setSelectedFont("Body");
-  setFontSize("12");
+  setFontSize("14");
+  setTextColor("Cyan");
   setBold(false);
   setItalic(false);
   setStrike(false);
@@ -39,6 +42,16 @@ const resetTextStyle = ({
 };
 
 const notImplemented = () => false;
+
+const colorAliases: Record<string, string> = {
+  blue: "Blue",
+  cyan: "Cyan",
+  green: "Green",
+  purple: "Purple",
+  red: "Red",
+  white: "White",
+  yellow: "Yellow"
+};
 
 // Central registry for all keyboard-driven actions
 export const CommandRegistry: Command[] = [
@@ -65,7 +78,7 @@ export const CommandRegistry: Command[] = [
   {
     name: "body",
     description: "Change font size",
-    action: setFontSizeCommand("Body", 12)
+    action: setFontSizeCommand("Body", 14)
   },
   {
     name: "font",
@@ -116,7 +129,13 @@ export const CommandRegistry: Command[] = [
   {
     name: "color",
     description: "Change the text colour",
-    action: notImplemented
+    action: ({ setTextColor }, color) => {
+      if (!color) return false;
+      const normalizedColor = colorAliases[color.toLowerCase()];
+      if (!normalizedColor && !/^#[0-9a-f]{6}$/i.test(color)) return false;
+      setTextColor(normalizedColor ?? color);
+      return true;
+    }
   },
   {
     name: "bulletlist",
