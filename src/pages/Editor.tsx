@@ -208,6 +208,8 @@ function Editor() {
   const navigate = useNavigate();
   const { noteId } = useParams();
   const initialNote = notes.find((note) => note.id === noteId) ?? notes[0];
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
 
   const [activeNoteId, setActiveNoteId] = useState(initialNote.id);
@@ -233,6 +235,37 @@ function Editor() {
   }, [searchValue]);
 
   const activeNote = notes.find((note) => note.id === activeNoteId) ?? notes[0];
+
+  const focusEditorAtStart = useCallback(() => {
+    setShowLogoPane(false);
+    setShowCommands(false);
+
+    requestAnimationFrame(() => {
+      const editorView = editorViewRef.current;
+      if (!editorView) return;
+
+      editorView.dispatch({
+        selection: { anchor: 0 },
+        scrollIntoView: true
+      });
+      editorView.focus();
+    });
+  }, []);
+
+  const focusSidebarOnActiveNote = useCallback(() => {
+    const activeNoteIndex = filteredNotes.findIndex((note) => note.id === activeNoteId);
+
+    if (activeNoteIndex >= 0) {
+      setSidebarSelection(activeNoteIndex + 1);
+      setShowLogoPane(false);
+    }
+
+    setShowCommands(false);
+
+    requestAnimationFrame(() => {
+      sidebarRef.current?.focus();
+    });
+  }, [activeNoteId, filteredNotes]);
 
   const setActiveNote = useCallback((noteIdToActivate: string, shouldNavigate = false) => {
     const nextNote = notes.find((note) => note.id === noteIdToActivate);
@@ -307,6 +340,7 @@ function Editor() {
 
   const editorExtensions = useMemo(() => [
     markdown(),
+    EditorView.lineWrapping,
     textStyleDecorations,
     commandLineDecorations,
     Prec.highest(keymap.of([
@@ -413,6 +447,21 @@ function Editor() {
     }
 
     event.preventDefault();
+
+    if (event.key === "Enter") {
+      if (sidebarSelection === 0) {
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      const selectedNote = filteredNotes[sidebarSelection - 1];
+      if (selectedNote) {
+        setActiveNote(selectedNote.id, true);
+        focusEditorAtStart();
+      }
+      return;
+    }
+
     const maxSelection = filteredNotes.length;
     let nextSelection = sidebarSelection;
 
@@ -424,12 +473,6 @@ function Editor() {
       nextSelection = 0;
     } else if (event.key === "End") {
       nextSelection = maxSelection;
-    }
-
-    if (event.key === "Enter" && sidebarSelection > 0) {
-      const selectedNote = filteredNotes[sidebarSelection - 1];
-      if (selectedNote) setActiveNote(selectedNote.id, true);
-      return;
     }
 
     setSidebarSelection(nextSelection);
@@ -453,15 +496,33 @@ function Editor() {
   }, [activeNoteId, filteredNotes, showLogoPane]);
 
   useEffect(() => {
+    sidebarRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape" && !showCommands) {
-        navigate("/");
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      if (showCommands) {
+        setShowCommands(false);
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      const sidebarElement = sidebarRef.current;
+      const isInSidebar = !!activeElement && !!sidebarElement?.contains(activeElement);
+
+      if (!isInSidebar) {
+        event.preventDefault();
+        focusSidebarOnActiveNote();
       }
     };
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [navigate, showCommands]);
+  }, [focusSidebarOnActiveNote, showCommands]);
 
   return (
     <div className="editor-shell">
@@ -473,7 +534,12 @@ function Editor() {
       </header>
 
       <div className="app-body">
-        <aside className="vault-sidebar" onKeyDown={handleSidebarKeyDown}>
+        <aside
+          className="vault-sidebar"
+          ref={sidebarRef}
+          tabIndex={0}
+          onKeyDown={handleSidebarKeyDown}
+        >
           <div className="vault-header">Vault</div>
 
           <label
@@ -482,6 +548,7 @@ function Editor() {
           >
             <span className="search-glyph" aria-hidden="true" />
             <input
+              ref={searchInputRef}
               type="text"
               value={searchValue}
               placeholder="Search notes"

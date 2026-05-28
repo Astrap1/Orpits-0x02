@@ -132,6 +132,10 @@ input {
   -webkit-backdrop-filter: blur(24px) saturate(130%);
 }
 
+.vault-sidebar:focus {
+  outline: 0;
+}
+
 .vault-header {
   padding: 0 8px;
   color: #fffaff;
@@ -317,12 +321,14 @@ input {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   min-height: 62px;
   padding: 0 clamp(30px, 5vw, 72px);
   border-bottom: 1px solid rgba(255, 255, 255, 0.055);
 }
 
 .note-title-anchor {
+  min-width: 0;
   max-width: 46vw;
   overflow: hidden;
   color: #f8f1ff;
@@ -388,6 +394,10 @@ input {
 .editor-stage .cm-scroller {
   overflow: auto;
   font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+}
+
+.editor-stage .cm-content {
+  overflow-wrap: anywhere;
 }
 
 .editor-stage .cm-command-line {
@@ -483,5 +493,30 @@ input {
 
   .editor-stage {
     padding: 0 24px;
+  }
+}
+
+@media (max-width: 640px) {
+  .vault-sidebar {
+    flex-basis: 208px;
+    width: 208px;
+    padding-inline: 12px;
+  }
+
+  .note-status-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    padding: 8px 18px;
+  }
+
+  .note-title-anchor,
+  .style-status span:first-child {
+    max-width: 100%;
+  }
+
+  .editor-stage {
+    padding: 0 18px;
   }
 }
