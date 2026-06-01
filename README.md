@@ -127,3 +127,6 @@ The next milestone objectives are:
 - Inputting non-standard text inputs, checking that they do not run as code
 5. Pilot Testing
 - Distributing the application to a cohort of 10+ target users to evaluate the effectiveness of the "mouseless" workflow in real-world note-taking scenarios.
+
+# Note
+For the current state of our app, only the windows version is available. However, for our final product, we would like to create a mac version as well.
