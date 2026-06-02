@@ -12,6 +12,10 @@ To build a keyboard-first note-taking editor where structure, computation, and A
 - As a coder brainstorming logic, I want to type //code to run a snippet and see the output in my notes to verify my ideas immediately
 3. The Academic Writer
 - As an essay writer, I want to type \\prompt to get instant AI feedback or expansion without leaving my editor.
+4. The Privacy Conscious User
+- As a user handling sensitive data, I want my notes saved locally in the .x2pad format so that I have complete ownership over my files without relying on cloud storage.
+5. The UI/UX Enthusiast
+- As a user who values aesthetics, I want a minimalist workspace with clean typography, rounded edges, and translucent sidebars so that the editor feels modern and unobtrusive.
 
 # Feature 1
 The Notepad (18 May - 31 May)
