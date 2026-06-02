@@ -74,6 +74,39 @@ Fuzzy Search (21 Jul - 27 Jul)
 ![cmd registry](project-docs/02_windows_obsidian_command_registry.png)
 ![ai assist](project-docs/03_windows_obsidian_ai_inline.png)
 
+# Command Registry
+<table>
+    <tr>
+        <th>Commands Registry:</th>
+        <th>Excel Commands:</th>
+    </tr>
+    <tr>
+        <td valign="top">
+            <ol>
+                <li>//title, //header, //body</li>
+                <li>//bold, //italic, //strike, //underline</li>
+                <li>//font</li>
+                <li>//color</li>
+                <li>//bulletlist, //numberlist</li>
+                <li>//linebreak</li>
+                <li>//code</li>
+                <li>//table</li>
+                <li>//date, //time</li>
+                <li>//wordcount</li>
+                <li>//save, //export</li>
+            </ol>
+        </td>
+        <td valign="top">
+            <ol>
+                <li>//sum()</li>
+                <li>//avg(), //mean(), //median()</li>
+                <li>//min(), //max()</li>
+                <li>//count()</li>
+            </ol>
+        </td>
+    </tr>
+</table>
+
 # Current Milestone Objectives
 For the current milestone, our main objective is to build the foundation of the note-taking editor before adding more advanced command, AI, code execution, and table features. This milestone focuses on proving that the editor can support a keyboard-first workflow and basic rich text formatting.
 
