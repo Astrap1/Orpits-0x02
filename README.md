@@ -1,6 +1,5 @@
 # Motivation
-Modern note-taking apps often prioritise a "click-heavy" visual interface that disrupts the "flow state" of power users. For developers and students, the constant context-switching 
-between the keyboard and mouse is an ergonomic bottleneck that slows down thought-to-text translation.
+Modern note-taking apps often prioritise a "click-heavy" visual interface that disrupts the "flow state" of power users. For developers and students, the constant context-switching between the keyboard and mouse is an ergonomic bottleneck that slows down thought-to-text translation.
 
 # Aim
 To build a keyboard-first note-taking editor where structure, computation, and AI assistance can be triggered without leaving the typing flow. By utilizing a "Command-Line Interface (CLI) within a Doc" approach, we hope to provide a seamless experience where structural changes, code execution, and AI assistance are all triggered via the home row. The best part of this would be that it will all be done without the need to memorise any keyboard shortcuts!
@@ -13,7 +12,7 @@ To build a keyboard-first note-taking editor where structure, computation, and A
 3. The Academic Writer
 - As an essay writer, I want to type \\prompt to get instant AI feedback or expansion without leaving my editor.
 4. The Privacy Conscious User
-- As a user handling sensitive data, I want my notes saved locally in the .x2pad format so that I have complete ownership over my files without relying on cloud storage.
+- As a user handling sensitive data, I want my notes saved locally in the .x2 format so that I have complete ownership over my files without relying on cloud storage.
 5. The UI/UX Enthusiast
 - As a user who values aesthetics, I want a minimalist workspace with clean typography, rounded edges, and translucent sidebars so that the editor feels modern and unobtrusive.
 
@@ -21,7 +20,7 @@ To build a keyboard-first note-taking editor where structure, computation, and A
 The Notepad (18 May - 31 May)
 - Blank page for users to type
 - Has all the standard features with good markup system
-- Able to save and export (.x2pad format)
+- Able to save and export (.x2 format)
 
 # Feature 2
 The // Registry (1 Jun - 11 Jun)
@@ -57,7 +56,7 @@ Fuzzy Search (21 Jul - 27 Jul)
 2. CodeMirror 6
 - Standard text areas cannot support a "CLI within a Doc" experience. CodeMirror provides a highly modular state architecture that allows for the creation of custom parsers. This is essential for detecting specific character sequences (like // or \\) in real-time without lagging the editor.
 3. Rust
-- The backend requires low-level control for file I/O (saving custom .x2pad files) and process execution. Rust guarantees memory safety without a garbage collector, ensuring the desktop app remains fast and free of memory leaks.
+- The backend requires low-level control for file I/O (saving custom .x2 files) and process execution. Rust guarantees memory safety without a garbage collector, ensuring the desktop app remains fast and free of memory leaks.
 4. Fuse.js
 - A keyboard-only interface lives or dies by its search capability. Fuse.js provides a lightweight, zero-dependency fuzzy search algorithm. This ensures that when a user triggers the command menu, the list filters instantaneously, maintaining the "flow state" of a power user.
 5. OpenAI API
@@ -107,6 +106,26 @@ Fuzzy Search (21 Jul - 27 Jul)
     </tr>
 </table>
 
+# .x2 Note Format
+The .x2 file format will be our local-first storage format for notes created in the editor. Instead of saving only plain text, the .x2 file will preserve the note content, formatting, command-generated blocks, tables, code boxes, and metadata needed to reopen the note exactly as the user left it.
+
+The save process would work like this:
+1. The user writes normally in the editor and may use commands such as `//bold`, `//table`, `//code`, or `\\<prompt>`.
+2. The editor keeps an internal document model that represents the note as structured blocks instead of only raw text.
+3. When the user runs //save, the app converts the current document model into the `.x2` file structure.
+4. The Rust/Tauri backend writes the .x2 file to the user's local device.
+5. When the user opens the file again, the app reads the .x2 file, validates the version, rebuilds the document model, and renders it back into the editor.
+
+Internally, the .x2 file should be structured data, most likely JSON for the first version because it is readable, easy to debug, and simple to parse from both TypeScript and Rust. The file would include:
+- format: Identifies the file as an .x2 note file.
+- version: Tracks the format version so future versions can remain backwards compatible.
+- metadata: Stores details such as the note title, created date, updated date, app version, and optional tags.
+- settings: Stores note-level preferences such as font size, colors, styles etc.
+- blocks: Stores the actual note content as an ordered list of blocks.
+
+# Architecture
+![architecture](project-docs/architecture.jpg)
+
 # Current Milestone Objectives
 For the current milestone, our main objective is to build the foundation of the note-taking editor before adding more advanced command, AI, code execution, and table features. This milestone focuses on proving that the editor can support a keyboard-first workflow and basic rich text formatting.
 
@@ -145,7 +164,7 @@ The next milestone objectives are:
 - Improve the command menu so it can filter and suggest commands as the user types.
 - Implement more `//` commands, such as list creation, line breaks, inserting date/time, word count insertion, save, and export.
 - Begin implementing table creation commands.
-- Add persistence for notes, including saving and loading `.x2pad` files.
+- Add persistence for notes, including saving and loading `.x2` files.
 - Improve error handling for invalid or incomplete commands.
 - Add basic tests or manual QA checklists for editor typing, command execution, and formatting behaviour.
 - Refine the UI based on feedback from testing the current editor prototype.
