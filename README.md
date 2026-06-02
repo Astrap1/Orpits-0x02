@@ -26,13 +26,13 @@ The Notepad (18 May - 31 May)
 The // Registry (1 Jun - 11 Jun)
 - Type an action without having to click the mouse
 - Change font sizes, text formats, create tables, code boxes, etc.
-- //<cmd><enter>
+- //cmd
 
 # Feature 3
 The \\ Registry (12 Jun - 29 Jun)
 - AI search
 - Generate suggestions or answer questions user has
-- \\<prompt><enter>
+- \\prompt
 
 # Feature 4
 Code Box (1 Jul - 10 Jul)
