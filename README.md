@@ -65,6 +65,11 @@ Fuzzy Search (21 Jul - 27 Jul)
 8. CSS
 - To define the visual design and layout of the application, including the dark editor theme, title bar, toolbar, formatting buttons, command menu, editor container, and status bar.
 
+# Design Ideas
+![main editor](project-docs/01_windows_obsidian_main_editor.png)
+![cmd registry](project-docs/02_windows_obsidian_command_registry.png)
+![ai assist](project-docs/03_windows_obsidian_ai_inline.png)
+
 # Current Milestone Objectives
 For the current milestone, our main objective is to build the foundation of the note-taking editor before adding more advanced command, AI, code execution, and table features. This milestone focuses on proving that the editor can support a keyboard-first workflow and basic rich text formatting.
 
