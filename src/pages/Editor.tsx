@@ -6,11 +6,12 @@ import { markdown } from "@codemirror/lang-markdown";
 import { Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap } from "@codemirror/view";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { CommandRegistry } from "../CommandRegistry";
+import { CommandRegistry, TEXT_COLOR_OPTIONS } from "../CommandRegistry";
 import "../styles/Editor.css";
 
 const DEFAULT_FONT_SIZE = "14";
-const COMMANDS_WITH_ARGUMENTS = new Set(["color", "font"]);
+const COMMANDS_WITH_ARGUMENTS = new Set(["color", "size"]);
+const BULLET_LIST_MARKER = "\u2022 ";
 
 const notes = [
   {
@@ -18,7 +19,7 @@ const notes = [
     title: "Sample Note",
     updatedAt: "Today",
     content:
-      "Welcome to x2pad.\n\nType //title, //header, //body, //bold, //italic, or //color cyan and press Enter to change the writing style.\n\n// color cyan\nThis line is a custom registry command, so it gets its own visual language."
+      "Welcome to x2pad.\n\nType //title, //header, //body, //bold, //italic, //size 12, //bulletlist, //numberlist, //date, //time, //wordcount, or //color red and press Enter to change the writing style.\n\n// color red\nThis line is a custom registry command, so it gets its own visual language."
   },
   {
     id: "second-sample-note",
@@ -29,15 +30,10 @@ const notes = [
   }
 ];
 
-const colorValues: Record<string, string> = {
-  Blue: "#7aa2ff",
-  Cyan: "#67e8f9",
-  Green: "#8ee6a8",
-  Purple: "#c4a7ff",
-  Red: "#ff8f9b",
-  White: "#f7f2ff",
-  Yellow: "#f5d76e"
-};
+const colorValues = TEXT_COLOR_OPTIONS.reduce<Record<string, string>>((values, color) => {
+  values[color.label] = color.value;
+  return values;
+}, {});
 
 interface ActiveTextStyle {
   fontSize: string;
@@ -172,6 +168,98 @@ function getCommandAtCursor(view: EditorView) {
   };
 }
 
+function getListLineInfo(lineText: string) {
+  const numberedMatch = lineText.match(/^([ \t]*)(\d+)\.\s/);
+
+  if (numberedMatch) {
+    return {
+      indentation: numberedMatch[1],
+      markerLength: numberedMatch[0].length,
+      nextMarker: `${numberedMatch[1]}${Number(numberedMatch[2]) + 1}. `
+    };
+  }
+
+  const bulletMatch = lineText.match(/^([ \t]*)(?:[-*]|\u2022)\s/);
+
+  if (bulletMatch) {
+    return {
+      indentation: bulletMatch[1],
+      markerLength: bulletMatch[0].length,
+      nextMarker: `${bulletMatch[1]}${BULLET_LIST_MARKER}`
+    };
+  }
+
+  return null;
+}
+
+function continueListAtCursor(view: EditorView) {
+  const selection = view.state.selection.main;
+
+  if (!selection.empty) {
+    return false;
+  }
+
+  const line = view.state.doc.lineAt(selection.head);
+  const listLine = getListLineInfo(line.text);
+  const cursorOffset = selection.head - line.from;
+
+  if (!listLine || cursorOffset < listLine.markerLength) {
+    return false;
+  }
+
+  const contentAfterMarker = line.text.slice(listLine.markerLength).trim();
+
+  if (!contentAfterMarker) {
+    view.dispatch({
+      changes: {
+        from: line.from,
+        to: line.from + listLine.markerLength,
+        insert: ""
+      },
+      selection: { anchor: line.from }
+    });
+    return true;
+  }
+
+  const insert = `\n${listLine.nextMarker}`;
+
+  view.dispatch({
+    changes: {
+      from: selection.head,
+      to: selection.head,
+      insert
+    },
+    selection: { anchor: selection.head + insert.length }
+  });
+  return true;
+}
+
+function deleteListMarkerAtCursor(view: EditorView) {
+  const selection = view.state.selection.main;
+
+  if (!selection.empty) {
+    return false;
+  }
+
+  const line = view.state.doc.lineAt(selection.head);
+  const listLine = getListLineInfo(line.text);
+  const cursorOffset = selection.head - line.from;
+
+  if (!listLine || cursorOffset !== listLine.markerLength) {
+    return false;
+  }
+
+  view.dispatch({
+    changes: {
+      from: line.from,
+      to: line.from + listLine.markerLength,
+      insert: ""
+    },
+    selection: { anchor: line.from }
+  });
+  return true;
+}
+
 function WindowControls() {
   const isTauri = "__TAURI_INTERNALS__" in window;
 
@@ -222,7 +310,7 @@ function Editor() {
 
   const [selectedFont, setSelectedFont] = useState("Body");
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
-  const [textColor, setTextColor] = useState("Cyan");
+  const [textColor, setTextColor] = useState("White");
   const [isBold, setBold] = useState(false);
   const [isItalic, setItalic] = useState(false);
   const [isStrike, setStrike] = useState(false);
@@ -310,8 +398,16 @@ function Editor() {
       return false;
     }
 
+    let commandReplacement = "";
     const handled = command.action(
       {
+        getDocumentText: () => (
+          view.state.doc.sliceString(0, pendingCommand.from) +
+          view.state.doc.sliceString(pendingCommand.to)
+        ),
+        insertText: (text) => {
+          commandReplacement = text;
+        },
         setBold,
         setFontSize,
         setItalic,
@@ -331,8 +427,9 @@ function Editor() {
       changes: {
         from: pendingCommand.from,
         to: pendingCommand.to,
-        insert: ""
-      }
+        insert: commandReplacement
+      },
+      selection: { anchor: pendingCommand.from + commandReplacement.length }
     });
     setShowCommands(false);
     return true;
@@ -346,7 +443,11 @@ function Editor() {
     Prec.highest(keymap.of([
       {
         key: "Enter",
-        run: runCommandAtCursor
+        run: (view) => runCommandAtCursor(view) || continueListAtCursor(view)
+      },
+      {
+        key: "Backspace",
+        run: deleteListMarkerAtCursor
       }
     ])),
     EditorView.updateListener.of((update) => {
@@ -636,8 +737,11 @@ function Editor() {
               >
                 {CommandRegistry.map((command) => (
                   <div className="command-menu-item" key={command.name}>
-                    <code>// {command.name}</code>
-                    <span>{command.description}</span>
+                    <code>//{command.name}</code>
+                    <span>
+                      {command.description}
+                      {command.arguments ? `: ${command.arguments.join(", ")}` : ""}
+                    </span>
                   </div>
                 ))}
               </div>

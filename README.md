@@ -84,7 +84,7 @@ Fuzzy Search (21 Jul - 27 Jul)
             <ol>
                 <li>//title, //header, //body</li>
                 <li>//bold, //italic, //strike, //underline</li>
-                <li>//font</li>
+                <li>//size</li>
                 <li>//color</li>
                 <li>//bulletlist, //numberlist</li>
                 <li>//linebreak</li>
