@@ -215,12 +215,12 @@ export const CommandRegistry: Command[] = [
     action: insertWordCount
   },
   {
-    name: "Save",
+    name: "save",
     description: "Save note",
     action: notImplemented
   },
   {
-    name: "Export",
+    name: "export",
     description: "Export note",
     action: notImplemented
   }

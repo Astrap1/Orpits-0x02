@@ -352,11 +352,24 @@ input {
   user-select: none;
 }
 
-.style-status span:first-child {
+.style-status span {
   max-width: 36vw;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-status {
+  max-width: 24vw;
+  color: #9c94aa;
+}
+
+.file-status.success {
+  color: #8ee6a8;
+}
+
+.file-status.error {
+  color: #ff8f9b;
 }
 
 .saved-dot {
@@ -449,6 +462,10 @@ input {
   -webkit-backdrop-filter: blur(18px);
 }
 
+.command-menu.above {
+  box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.34);
+}
+
 .command-menu-item {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);
@@ -475,6 +492,13 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.command-menu-empty {
+  padding: 10px;
+  border-radius: 11px;
+  color: #9c94aa;
+  font-size: 12px;
 }
 
 @media (max-width: 860px) {
@@ -512,7 +536,7 @@ input {
   }
 
   .note-title-anchor,
-  .style-status span:first-child {
+  .style-status span {
     max-width: 100%;
   }
 

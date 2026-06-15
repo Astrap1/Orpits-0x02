@@ -1,16 +1,34 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, MutableRefObject } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import { Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap } from "@codemirror/view";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CommandRegistry, TEXT_COLOR_OPTIONS } from "../CommandRegistry";
 import "../styles/Editor.css";
 
 const DEFAULT_FONT_SIZE = "14";
+const COMMAND_MENU_MAX_HEIGHT = 360;
+const COMMAND_MENU_VERTICAL_GAP = 8;
+const COMMAND_MENU_PADDING = 16;
+const COMMAND_MENU_ITEM_HEIGHT = 41;
 const COMMANDS_WITH_ARGUMENTS = new Set(["color", "size"]);
+const RETROACTIVE_STYLE_COMMANDS = new Set([
+  "title",
+  "header",
+  "body",
+  "size",
+  "bold",
+  "italic",
+  "strike",
+  "underline",
+  "default",
+  "color"
+]);
 const BULLET_LIST_MARKER = "\u2022 ";
 
 const notes = [
@@ -44,13 +62,52 @@ interface ActiveTextStyle {
   isUnderline: boolean;
 }
 
+interface TextStyleRange {
+  from: number;
+  to: number;
+  style: ActiveTextStyle;
+}
+
+interface LoadedX2Note {
+  title: string;
+  content: string;
+  savedAt: string;
+  path: string;
+  styles?: TextStyleRange[];
+}
+
+interface PendingStyleRestore {
+  content: string;
+  styles: TextStyleRange[];
+}
+
 const addTextStyleDecoration = StateEffect.define<{
   from: number;
   to: number;
   style: ActiveTextStyle;
 }>();
 
+const replaceTextStyleDecorations = StateEffect.define<TextStyleRange[]>();
+
 const getResolvedColor = (color: string) => colorValues[color] ?? color;
+
+const defaultTextStyle: ActiveTextStyle = {
+  fontSize: DEFAULT_FONT_SIZE,
+  textColor: "White",
+  isBold: false,
+  isItalic: false,
+  isStrike: false,
+  isUnderline: false
+};
+
+const isDefaultTextStyle = (style: ActiveTextStyle) => (
+  style.fontSize === defaultTextStyle.fontSize &&
+  style.textColor === defaultTextStyle.textColor &&
+  style.isBold === defaultTextStyle.isBold &&
+  style.isItalic === defaultTextStyle.isItalic &&
+  style.isStrike === defaultTextStyle.isStrike &&
+  style.isUnderline === defaultTextStyle.isUnderline
+);
 
 const getTextStyleAttribute = (style: ActiveTextStyle) => {
   const styles = [
@@ -82,6 +139,33 @@ const getTextStyleAttribute = (style: ActiveTextStyle) => {
   return styles.join(" ");
 };
 
+function createTextStyleMark(style: ActiveTextStyle) {
+  return Decoration.mark({
+    attributes: {
+      style: getTextStyleAttribute(style)
+    }
+  });
+}
+
+function buildTextStyleDecorationSet(ranges: TextStyleRange[], docLength: number) {
+  const builder = new RangeSetBuilder<Decoration>();
+
+  ranges
+    .filter((range) => range.from < range.to)
+    .map((range) => ({
+      from: Math.max(0, Math.min(range.from, docLength)),
+      to: Math.max(0, Math.min(range.to, docLength)),
+      style: range.style
+    }))
+    .filter((range) => range.from < range.to)
+    .sort((left, right) => left.from - right.from || left.to - right.to)
+    .forEach((range) => {
+      builder.add(range.from, range.to, createTextStyleMark(range.style));
+    });
+
+  return builder.finish();
+}
+
 const textStyleDecorations = StateField.define<DecorationSet>({
   create() {
     return Decoration.none;
@@ -90,17 +174,18 @@ const textStyleDecorations = StateField.define<DecorationSet>({
     let mappedDecorations = decorations.map(transaction.changes);
 
     for (const effect of transaction.effects) {
-      if (effect.is(addTextStyleDecoration)) {
+      if (effect.is(replaceTextStyleDecorations)) {
+        mappedDecorations = buildTextStyleDecorationSet(
+          effect.value,
+          transaction.state.doc.length
+        );
+      } else if (effect.is(addTextStyleDecoration)) {
         const { from, to, style } = effect.value;
 
         if (from < to) {
           mappedDecorations = mappedDecorations.update({
             add: [
-              Decoration.mark({
-                attributes: {
-                  style: getTextStyleAttribute(style)
-                }
-              }).range(from, to)
+              createTextStyleMark(style).range(from, to)
             ]
           });
         }
@@ -111,6 +196,112 @@ const textStyleDecorations = StateField.define<DecorationSet>({
   },
   provide: (field) => EditorView.decorations.from(field)
 });
+
+function removeTextRangeFromStyleRanges(ranges: TextStyleRange[], from: number, to: number) {
+  const removedLength = to - from;
+  const nextRanges: TextStyleRange[] = [];
+
+  for (const range of ranges) {
+    if (range.to <= from) {
+      nextRanges.push(range);
+      continue;
+    }
+
+    if (range.from >= to) {
+      nextRanges.push({
+        ...range,
+        from: range.from - removedLength,
+        to: range.to - removedLength
+      });
+      continue;
+    }
+
+    if (range.from < from) {
+      nextRanges.push({
+        ...range,
+        to: from
+      });
+    }
+
+    if (range.to > to) {
+      nextRanges.push({
+        ...range,
+        from,
+        to: range.to - removedLength
+      });
+    }
+  }
+
+  return nextRanges.filter((range) => range.from < range.to);
+}
+
+function replaceStyleRange(
+  ranges: TextStyleRange[],
+  from: number,
+  to: number,
+  style: ActiveTextStyle
+) {
+  const nextRanges = removeTextRangeFromStyleRanges(ranges, from, to);
+
+  if (!isDefaultTextStyle(style) && from < to) {
+    nextRanges.push({ from, to, style });
+  }
+
+  return nextRanges.sort((left, right) => left.from - right.from || left.to - right.to);
+}
+
+function getRetroactiveStyleTarget(view: EditorView, commandFrom: number) {
+  const line = view.state.doc.lineAt(commandFrom);
+  const textBeforeCommand = view.state.doc.sliceString(line.from, commandFrom);
+  const firstContentIndex = textBeforeCommand.search(/\S/);
+
+  if (firstContentIndex < 0) {
+    return null;
+  }
+
+  const trimmedEnd = textBeforeCommand.trimEnd().length;
+  const from = line.from + firstContentIndex;
+  const to = line.from + trimmedEnd;
+
+  return from < to ? { from, to } : null;
+}
+
+function mapStyleRangesThroughChanges(
+  ranges: TextStyleRange[],
+  changes: { mapPos: (position: number, assoc?: number) => number },
+  docLength: number
+) {
+  return ranges
+    .map((range) => ({
+      ...range,
+      from: Math.max(0, Math.min(changes.mapPos(range.from, 1), docLength)),
+      to: Math.max(0, Math.min(changes.mapPos(range.to, -1), docLength))
+    }))
+    .filter((range) => range.from < range.to);
+}
+
+function applyPendingStyleRestore(
+  editorView: EditorView | null,
+  pendingStyleRestoreRef: MutableRefObject<PendingStyleRestore | null>,
+  styleRangesRef: MutableRefObject<TextStyleRange[]>
+) {
+  const pendingStyleRestore = pendingStyleRestoreRef.current;
+
+  if (!editorView || !pendingStyleRestore) {
+    return false;
+  }
+
+  if (editorView.state.doc.toString() !== pendingStyleRestore.content) {
+    return false;
+  }
+
+  editorView.dispatch({
+    effects: replaceTextStyleDecorations.of(pendingStyleRestore.styles)
+  });
+  styleRangesRef.current = pendingStyleRestore.styles;
+  pendingStyleRestoreRef.current = null;
+  return true;
+}
 
 function buildCommandLineDecorations(doc: Text) {
   const builder = new RangeSetBuilder<Decoration>();
@@ -166,6 +357,43 @@ function getCommandAtCursor(view: EditorView) {
     from: line.from + commandStartOffset,
     to: selection.head
   };
+}
+
+function getSafeFileName(title: string, extension: "x2" | "pdf") {
+  const baseName = title
+    .trim()
+    .replace(/[<>:"/\\|?*]+/g, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 80)
+    .trim() || "Untitled Note";
+
+  return `${baseName}.${extension}`;
+}
+
+function ensurePathExtension(path: string, extension: "x2" | "pdf") {
+  return path.toLowerCase().endsWith(`.${extension}`) ? path : `${path}.${extension}`;
+}
+
+function getCommandMenuPosition(
+  coords: { top: number; bottom: number; left: number },
+  commandCount: number
+) {
+  const estimatedMenuHeight = Math.min(
+    COMMAND_MENU_MAX_HEIGHT,
+    COMMAND_MENU_PADDING + Math.max(1, commandCount) * COMMAND_MENU_ITEM_HEIGHT
+  );
+  const belowTop = coords.bottom + COMMAND_MENU_VERTICAL_GAP;
+  const aboveTop = Math.max(
+    COMMAND_MENU_VERTICAL_GAP,
+    coords.top - COMMAND_MENU_VERTICAL_GAP - estimatedMenuHeight
+  );
+  const hasEnoughSpaceBelow = belowTop + estimatedMenuHeight <= window.innerHeight - COMMAND_MENU_VERTICAL_GAP;
+
+  return {
+    top: hasEnoughSpaceBelow ? belowTop : aboveTop,
+    left: coords.left,
+    placement: hasEnoughSpaceBelow ? "below" : "above"
+  } as const;
 }
 
 function getListLineInfo(lineText: string) {
@@ -299,14 +527,26 @@ function Editor() {
   const sidebarRef = useRef<HTMLElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
+  const pendingStyleRestoreRef = useRef<PendingStyleRestore | null>(null);
+  const styleRangesRef = useRef<TextStyleRange[]>([]);
+  const forcedStyleRangesRef = useRef<TextStyleRange[] | null>(null);
 
   const [activeNoteId, setActiveNoteId] = useState(initialNote.id);
+  const [openedNoteTitle, setOpenedNoteTitle] = useState<string | null>(null);
+  const [openedNotePath, setOpenedNotePath] = useState<string | null>(null);
   const [value, setValue] = useState(initialNote.content);
   const [searchValue, setSearchValue] = useState("");
   const [sidebarSelection, setSidebarSelection] = useState(1);
   const [showLogoPane, setShowLogoPane] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
-  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+  const [commandQuery, setCommandQuery] = useState("");
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number; placement: "below" | "above" }>({
+    top: 0,
+    left: 0,
+    placement: "below"
+  });
+  const [fileStatus, setFileStatus] = useState("Ready");
+  const [fileStatusKind, setFileStatusKind] = useState<"idle" | "success" | "error">("idle");
 
   const [selectedFont, setSelectedFont] = useState("Body");
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
@@ -323,10 +563,21 @@ function Editor() {
   }, [searchValue]);
 
   const activeNote = notes.find((note) => note.id === activeNoteId) ?? notes[0];
+  const activeNoteTitle = openedNoteTitle ?? activeNote.title;
+  const visibleCommands = useMemo(() => {
+    const query = commandQuery.trim().toLowerCase();
+
+    if (!query) {
+      return CommandRegistry;
+    }
+
+    return CommandRegistry.filter((command) => command.name.toLowerCase().startsWith(query));
+  }, [commandQuery]);
 
   const focusEditorAtStart = useCallback(() => {
     setShowLogoPane(false);
     setShowCommands(false);
+    setCommandQuery("");
 
     requestAnimationFrame(() => {
       const editorView = editorViewRef.current;
@@ -349,23 +600,47 @@ function Editor() {
     }
 
     setShowCommands(false);
+    setCommandQuery("");
 
     requestAnimationFrame(() => {
       sidebarRef.current?.focus();
     });
   }, [activeNoteId, filteredNotes]);
 
+  const openLoadedX2Note = useCallback((note: LoadedX2Note) => {
+    pendingStyleRestoreRef.current = {
+      content: note.content,
+      styles: note.styles ?? []
+    };
+    setOpenedNoteTitle(note.title || "Untitled Note");
+    setOpenedNotePath(note.path);
+    setValue(note.content);
+    setShowLogoPane(false);
+    setShowCommands(false);
+    setCommandQuery("");
+    setFileStatus("Opened .x2 file.");
+    setFileStatusKind("success");
+  }, []);
+
   const setActiveNote = useCallback((noteIdToActivate: string, shouldNavigate = false) => {
     const nextNote = notes.find((note) => note.id === noteIdToActivate);
     if (!nextNote) return;
 
     setActiveNoteId(nextNote.id);
+    setOpenedNoteTitle(null);
+    setOpenedNotePath(null);
+    pendingStyleRestoreRef.current = null;
+    styleRangesRef.current = [];
     setValue(nextNote.content);
     setShowLogoPane(false);
     setShowCommands(false);
+    setCommandQuery("");
 
     requestAnimationFrame(() => {
-      editorViewRef.current?.dispatch({ selection: { anchor: 0 } });
+      editorViewRef.current?.dispatch({
+        selection: { anchor: 0 },
+        effects: replaceTextStyleDecorations.of([])
+      });
     });
 
     if (shouldNavigate) {
@@ -377,7 +652,134 @@ function Editor() {
     setSidebarSelection(0);
     setShowLogoPane(true);
     setShowCommands(false);
+    setCommandQuery("");
   }, []);
+
+  const runFileCommand = useCallback(async (
+    commandName: "save" | "export",
+    documentText: string,
+    title: string,
+    currentPath: string | null,
+    styles: TextStyleRange[]
+  ) => {
+    const isTauri = "__TAURI_INTERNALS__" in window;
+
+    if (!isTauri) {
+      setFileStatus("Save and export require the desktop app.");
+      setFileStatusKind("error");
+      return;
+    }
+
+    const isSaveCommand = commandName === "save";
+    const extension = isSaveCommand ? "x2" : "pdf";
+    let outputPath = currentPath && isSaveCommand ? currentPath : null;
+
+    if (!outputPath) {
+      const selectedPath = await save({
+        defaultPath: getSafeFileName(title, extension),
+        filters: [
+          {
+            name: isSaveCommand ? "x2 note" : "PDF document",
+            extensions: [extension]
+          }
+        ]
+      });
+
+      if (!selectedPath) {
+        setFileStatus(isSaveCommand ? "Save cancelled." : "Export cancelled.");
+        setFileStatusKind("idle");
+        return;
+      }
+
+      outputPath = ensurePathExtension(selectedPath, extension);
+    }
+
+    const note = {
+      title,
+      content: documentText,
+      styles
+    };
+
+    try {
+      setFileStatus(isSaveCommand ? "Saving..." : "Exporting PDF...");
+      setFileStatusKind("idle");
+
+      if (isSaveCommand) {
+        await invoke("save_x2_note", { path: outputPath, note });
+        setOpenedNoteTitle(title || "Untitled Note");
+        setOpenedNotePath(outputPath);
+        setFileStatus(`Saved .x2 file (${styles.length} style ${styles.length === 1 ? "range" : "ranges"}).`);
+      } else {
+        await invoke("export_note_pdf", { path: outputPath, note });
+        setFileStatus("Exported PDF.");
+      }
+
+      setFileStatusKind("success");
+    } catch (error) {
+      setFileStatus(String(error));
+      setFileStatusKind("error");
+    }
+  }, []);
+
+  const getStyleForCommand = useCallback((commandName: string, argument?: string) => {
+    const nextStyle = {
+      fontSize,
+      textColor,
+      isBold,
+      isItalic,
+      isStrike,
+      isUnderline
+    };
+
+    if (commandName === "default") {
+      return defaultTextStyle;
+    }
+
+    if (commandName === "title") {
+      return { ...nextStyle, fontSize: "24" };
+    }
+
+    if (commandName === "header") {
+      return { ...nextStyle, fontSize: "16" };
+    }
+
+    if (commandName === "body") {
+      return { ...nextStyle, fontSize: DEFAULT_FONT_SIZE };
+    }
+
+    if (commandName === "size") {
+      const numericSize = Number(argument);
+      return Number.isFinite(numericSize) && numericSize > 0
+        ? { ...nextStyle, fontSize: String(numericSize) }
+        : null;
+    }
+
+    if (commandName === "bold") {
+      return { ...nextStyle, isBold: true };
+    }
+
+    if (commandName === "italic") {
+      return { ...nextStyle, isItalic: true };
+    }
+
+    if (commandName === "strike") {
+      return { ...nextStyle, isStrike: true };
+    }
+
+    if (commandName === "underline") {
+      return { ...nextStyle, isUnderline: true };
+    }
+
+    if (commandName === "color") {
+      const color = TEXT_COLOR_OPTIONS.find(
+        (option) => option.name === argument?.toLowerCase()
+      );
+
+      return color ? { ...nextStyle, textColor: color.label } : null;
+    }
+
+    return null;
+  }, [fontSize, textColor, isBold, isItalic, isStrike, isUnderline]);
 
   const runCommandAtCursor = useCallback((view: EditorView) => {
     const pendingCommand = getCommandAtCursor(view);
@@ -398,13 +800,36 @@ function Editor() {
       return false;
     }
 
+    const commandName = command.name.toLowerCase();
+    const documentText = (
+      view.state.doc.sliceString(0, pendingCommand.from) +
+      view.state.doc.sliceString(pendingCommand.to)
+    );
+    const documentStyles = removeTextRangeFromStyleRanges(
+      styleRangesRef.current,
+      pendingCommand.from,
+      pendingCommand.to
+    );
+
+    if (commandName === "save" || commandName === "export") {
+      view.dispatch({
+        changes: {
+          from: pendingCommand.from,
+          to: pendingCommand.to,
+          insert: ""
+        },
+        selection: { anchor: pendingCommand.from }
+      });
+      setShowCommands(false);
+      setCommandQuery("");
+      void runFileCommand(commandName, documentText, activeNoteTitle, openedNotePath, documentStyles);
+      return true;
+    }
+
     let commandReplacement = "";
     const handled = command.action(
       {
-        getDocumentText: () => (
-          view.state.doc.sliceString(0, pendingCommand.from) +
-          view.state.doc.sliceString(pendingCommand.to)
-        ),
+        getDocumentText: () => documentText,
         insertText: (text) => {
           commandReplacement = text;
         },
@@ -423,6 +848,41 @@ function Editor() {
       return false;
     }
 
+    const retroactiveTarget = RETROACTIVE_STYLE_COMMANDS.has(commandName)
+      ? getRetroactiveStyleTarget(view, pendingCommand.from)
+      : null;
+    const retroactiveStyle = retroactiveTarget
+      ? getStyleForCommand(commandName, pendingCommand.argument)
+      : null;
+
+    if (retroactiveTarget && retroactiveStyle) {
+      const rangesAfterCommandRemoval = removeTextRangeFromStyleRanges(
+        styleRangesRef.current,
+        pendingCommand.from,
+        pendingCommand.to
+      );
+      const nextStyleRanges = replaceStyleRange(
+        rangesAfterCommandRemoval,
+        retroactiveTarget.from,
+        retroactiveTarget.to,
+        retroactiveStyle
+      );
+
+      forcedStyleRangesRef.current = nextStyleRanges;
+      view.dispatch({
+        changes: {
+          from: pendingCommand.from,
+          to: pendingCommand.to,
+          insert: ""
+        },
+        effects: replaceTextStyleDecorations.of(nextStyleRanges),
+        selection: { anchor: retroactiveTarget.to }
+      });
+      setShowCommands(false);
+      setCommandQuery("");
+      return true;
+    }
+
     view.dispatch({
       changes: {
         from: pendingCommand.from,
@@ -432,8 +892,9 @@ function Editor() {
       selection: { anchor: pendingCommand.from + commandReplacement.length }
     });
     setShowCommands(false);
+    setCommandQuery("");
     return true;
-  }, []);
+  }, [activeNoteTitle, getStyleForCommand, openedNotePath, runFileCommand]);
 
   const editorExtensions = useMemo(() => [
     markdown(),
@@ -455,25 +916,50 @@ function Editor() {
         return;
       }
 
+      const forcedStyleRanges = forcedStyleRangesRef.current;
+
+      if (forcedStyleRanges) {
+        styleRangesRef.current = forcedStyleRanges;
+        forcedStyleRangesRef.current = null;
+        return;
+      }
+
+      styleRangesRef.current = mapStyleRangesThroughChanges(
+        styleRangesRef.current,
+        update.changes,
+        update.state.doc.length
+      );
+
       const effects: StateEffect<unknown>[] = [];
+      const currentStyle = {
+        fontSize,
+        textColor,
+        isBold,
+        isItalic,
+        isStrike,
+        isUnderline
+      };
 
       update.changes.iterChanges((_fromA, _toA, fromB, toB, inserted) => {
-        if (fromB >= toB || inserted.toString().trim().length === 0) {
+        if (
+          fromB >= toB ||
+          inserted.toString().trim().length === 0 ||
+          isDefaultTextStyle(currentStyle)
+        ) {
           return;
         }
 
-        effects.push(addTextStyleDecoration.of({
+        const range = {
           from: fromB,
           to: toB,
-          style: {
-            fontSize,
-            textColor,
-            isBold,
-            isItalic,
-            isStrike,
-            isUnderline
-          }
-        }));
+          style: currentStyle
+        };
+
+        styleRangesRef.current = [
+          ...styleRangesRef.current,
+          range
+        ];
+        effects.push(addTextStyleDecoration.of(range));
       });
 
       if (effects.length > 0) {
@@ -518,17 +1004,24 @@ function Editor() {
     const line = state.doc.lineAt(cursor);
     const cursorOffset = cursor - line.from;
     const textBeforeCursor = line.text.slice(0, cursorOffset);
-    const isTypingCommand = /\/\/[a-z]*(?:\s+[^/\s]*)?$/i.test(textBeforeCursor);
+    const commandMatch = textBeforeCursor.match(/\/\/([a-z]*)(?:\s+[^/\s]*)?$/i);
 
-    if (isTypingCommand) {
+    if (commandMatch) {
+      const nextCommandQuery = commandMatch[1].toLowerCase();
+      const nextVisibleCommandCount = nextCommandQuery
+        ? CommandRegistry.filter((command) => command.name.toLowerCase().startsWith(nextCommandQuery)).length
+        : CommandRegistry.length;
+
       setShowCommands(true);
+      setCommandQuery(nextCommandQuery);
 
       const coords = viewUpdate.view.coordsAtPos(cursor);
       if (coords) {
-        setMenuPos({ top: coords.bottom + 8, left: coords.left });
+        setMenuPos(getCommandMenuPosition(coords, nextVisibleCommandCount));
       }
     } else {
       setShowCommands(false);
+      setCommandQuery("");
     }
   }, []);
 
@@ -601,6 +1094,51 @@ function Editor() {
   }, []);
 
   useEffect(() => {
+    const isTauri = "__TAURI_INTERNALS__" in window;
+
+    if (!isTauri) {
+      return;
+    }
+
+    void invoke<LoadedX2Note | null>("load_startup_x2_note")
+      .then((note) => {
+        if (!note) {
+          return;
+        }
+
+        openLoadedX2Note(note);
+      })
+      .catch((error) => {
+        setFileStatus(String(error));
+        setFileStatusKind("error");
+      });
+  }, [openLoadedX2Note]);
+
+  useEffect(() => {
+    if (!pendingStyleRestoreRef.current || !editorViewRef.current) {
+      return;
+    }
+
+    let attempts = 0;
+    let animationFrame = 0;
+
+    const tryRestore = () => {
+      attempts += 1;
+
+      if (applyPendingStyleRestore(editorViewRef.current, pendingStyleRestoreRef, styleRangesRef)) {
+        return;
+      }
+
+      if (attempts < 10) {
+        animationFrame = requestAnimationFrame(tryRestore);
+      }
+    };
+
+    animationFrame = requestAnimationFrame(tryRestore);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [value]);
+
+  useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") {
         return;
@@ -608,6 +1146,7 @@ function Editor() {
 
       if (showCommands) {
         setShowCommands(false);
+        setCommandQuery("");
         return;
       }
 
@@ -695,9 +1234,10 @@ function Editor() {
         <main className="editor-main">
           <div className="note-status-bar">
             <a className="note-title-anchor" href={`#/editor/${activeNote.id}`} tabIndex={-1}>
-              {showLogoPane ? "Search" : activeNote.title}
+              {showLogoPane ? "Search" : activeNoteTitle}
             </a>
             <div className="style-status">
+              <span className={`file-status ${fileStatusKind}`}>{fileStatus}</span>
               <span>{styleIndicator}</span>
               <span className="saved-dot" aria-label="Saved" />
             </div>
@@ -717,6 +1257,8 @@ function Editor() {
                 onChange={onChange}
                 onCreateEditor={(view) => {
                   editorViewRef.current = view;
+
+                  applyPendingStyleRestore(view, pendingStyleRestoreRef, styleRangesRef);
                 }}
                 basicSetup={{
                   lineNumbers: false,
@@ -729,13 +1271,13 @@ function Editor() {
 
             {showCommands && (
               <div
-                className="command-menu"
+                className={`command-menu ${menuPos.placement === "above" ? "above" : "below"}`}
                 style={{
                   top: menuPos.top,
                   left: menuPos.left
                 }}
               >
-                {CommandRegistry.map((command) => (
+                {visibleCommands.length > 0 ? visibleCommands.map((command) => (
                   <div className="command-menu-item" key={command.name}>
                     <code>//{command.name}</code>
                     <span>
@@ -743,7 +1285,11 @@ function Editor() {
                       {command.arguments ? `: ${command.arguments.join(", ")}` : ""}
                     </span>
                   </div>
-                ))}
+                )) : (
+                  <div className="command-menu-empty">
+                    No commands match //{commandQuery}
+                  </div>
+                )}
               </div>
             )}
           </section>
