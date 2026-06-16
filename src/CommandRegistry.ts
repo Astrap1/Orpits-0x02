@@ -25,7 +25,7 @@ export const TEXT_COLOR_OPTIONS = [
   { name: "blue", label: "Blue", value: "#7aa2ff" },
   { name: "purple", label: "Purple", value: "#c4a7ff" },
   { name: "black", label: "Black", value: "#111111" },
-  { name: "white", label: "White", value: "#f7f2ff" }
+  { name: "white", label: "White", value: "#ffffff" }
 ];
 
 const setFontSizeCommand = (font: string, size: number) => {

@@ -410,15 +410,21 @@ input {
 }
 
 .editor-stage .cm-content {
+  color: #ffffff !important;
   overflow-wrap: anywhere;
+}
+
+.editor-stage .cm-line {
+  color: #ffffff;
 }
 
 .editor-stage .cm-command-line {
   background: rgba(45, 212, 191, 0.055);
 }
 
-.editor-stage .cm-command-command {
-  color: #67e8f9;
+.editor-stage .cm-command-command,
+.editor-stage .cm-command-command * {
+  color: #67e8f9 !important;
   font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   font-weight: 650;
   letter-spacing: 0;

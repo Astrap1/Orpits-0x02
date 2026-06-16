@@ -17,18 +17,6 @@ const COMMAND_MENU_VERTICAL_GAP = 8;
 const COMMAND_MENU_PADDING = 16;
 const COMMAND_MENU_ITEM_HEIGHT = 41;
 const COMMANDS_WITH_ARGUMENTS = new Set(["color", "size"]);
-const RETROACTIVE_STYLE_COMMANDS = new Set([
-  "title",
-  "header",
-  "body",
-  "size",
-  "bold",
-  "italic",
-  "strike",
-  "underline",
-  "default",
-  "color"
-]);
 const BULLET_LIST_MARKER = "\u2022 ";
 
 const notes = [
@@ -235,37 +223,6 @@ function removeTextRangeFromStyleRanges(ranges: TextStyleRange[], from: number, 
   return nextRanges.filter((range) => range.from < range.to);
 }
 
-function replaceStyleRange(
-  ranges: TextStyleRange[],
-  from: number,
-  to: number,
-  style: ActiveTextStyle
-) {
-  const nextRanges = removeTextRangeFromStyleRanges(ranges, from, to);
-
-  if (!isDefaultTextStyle(style) && from < to) {
-    nextRanges.push({ from, to, style });
-  }
-
-  return nextRanges.sort((left, right) => left.from - right.from || left.to - right.to);
-}
-
-function getRetroactiveStyleTarget(view: EditorView, commandFrom: number) {
-  const line = view.state.doc.lineAt(commandFrom);
-  const textBeforeCommand = view.state.doc.sliceString(line.from, commandFrom);
-  const firstContentIndex = textBeforeCommand.search(/\S/);
-
-  if (firstContentIndex < 0) {
-    return null;
-  }
-
-  const trimmedEnd = textBeforeCommand.trimEnd().length;
-  const from = line.from + firstContentIndex;
-  const to = line.from + trimmedEnd;
-
-  return from < to ? { from, to } : null;
-}
-
 function mapStyleRangesThroughChanges(
   ranges: TextStyleRange[],
   changes: { mapPos: (position: number, assoc?: number) => number },
@@ -305,13 +262,26 @@ function applyPendingStyleRestore(
 
 function buildCommandLineDecorations(doc: Text) {
   const builder = new RangeSetBuilder<Decoration>();
+  const commandTokenPattern = /(\/\/[a-z]*)(?:\s+([^/\s]+))?/gi;
 
   for (let index = 1; index <= doc.lines; index += 1) {
     const line = doc.line(index);
 
     if (line.text.trimStart().startsWith("//")) {
       builder.add(line.from, line.from, Decoration.line({ class: "cm-command-line" }));
-      builder.add(line.from, line.to, Decoration.mark({ class: "cm-command-command" }));
+    }
+
+    for (const match of line.text.matchAll(commandTokenPattern)) {
+      const commandToken = match[1] ?? "";
+      const commandName = commandToken.slice(2).toLowerCase();
+      const commandFrom = line.from + (match.index ?? 0);
+      let commandTo = commandFrom + commandToken.length;
+
+      if (commandName && COMMANDS_WITH_ARGUMENTS.has(commandName) && match[2]) {
+        commandTo = commandFrom + match[0].length;
+      }
+
+      builder.add(commandFrom, commandTo, Decoration.mark({ class: "cm-command-command" }));
     }
   }
 
@@ -721,66 +691,6 @@ function Editor() {
     }
   }, []);
 
-  const getStyleForCommand = useCallback((commandName: string, argument?: string) => {
-    const nextStyle = {
-      fontSize,
-      textColor,
-      isBold,
-      isItalic,
-      isStrike,
-      isUnderline
-    };
-
-    if (commandName === "default") {
-      return defaultTextStyle;
-    }
-
-    if (commandName === "title") {
-      return { ...nextStyle, fontSize: "24" };
-    }
-
-    if (commandName === "header") {
-      return { ...nextStyle, fontSize: "16" };
-    }
-
-    if (commandName === "body") {
-      return { ...nextStyle, fontSize: DEFAULT_FONT_SIZE };
-    }
-
-    if (commandName === "size") {
-      const numericSize = Number(argument);
-      return Number.isFinite(numericSize) && numericSize > 0
-        ? { ...nextStyle, fontSize: String(numericSize) }
-        : null;
-    }
-
-    if (commandName === "bold") {
-      return { ...nextStyle, isBold: true };
-    }
-
-    if (commandName === "italic") {
-      return { ...nextStyle, isItalic: true };
-    }
-
-    if (commandName === "strike") {
-      return { ...nextStyle, isStrike: true };
-    }
-
-    if (commandName === "underline") {
-      return { ...nextStyle, isUnderline: true };
-    }
-
-    if (commandName === "color") {
-      const color = TEXT_COLOR_OPTIONS.find(
-        (option) => option.name === argument?.toLowerCase()
-      );
-
-      return color ? { ...nextStyle, textColor: color.label } : null;
-    }
-
-    return null;
-  }, [fontSize, textColor, isBold, isItalic, isStrike, isUnderline]);
-
   const runCommandAtCursor = useCallback((view: EditorView) => {
     const pendingCommand = getCommandAtCursor(view);
 
@@ -848,41 +758,6 @@ function Editor() {
       return false;
     }
 
-    const retroactiveTarget = RETROACTIVE_STYLE_COMMANDS.has(commandName)
-      ? getRetroactiveStyleTarget(view, pendingCommand.from)
-      : null;
-    const retroactiveStyle = retroactiveTarget
-      ? getStyleForCommand(commandName, pendingCommand.argument)
-      : null;
-
-    if (retroactiveTarget && retroactiveStyle) {
-      const rangesAfterCommandRemoval = removeTextRangeFromStyleRanges(
-        styleRangesRef.current,
-        pendingCommand.from,
-        pendingCommand.to
-      );
-      const nextStyleRanges = replaceStyleRange(
-        rangesAfterCommandRemoval,
-        retroactiveTarget.from,
-        retroactiveTarget.to,
-        retroactiveStyle
-      );
-
-      forcedStyleRangesRef.current = nextStyleRanges;
-      view.dispatch({
-        changes: {
-          from: pendingCommand.from,
-          to: pendingCommand.to,
-          insert: ""
-        },
-        effects: replaceTextStyleDecorations.of(nextStyleRanges),
-        selection: { anchor: retroactiveTarget.to }
-      });
-      setShowCommands(false);
-      setCommandQuery("");
-      return true;
-    }
-
     view.dispatch({
       changes: {
         from: pendingCommand.from,
@@ -894,7 +769,7 @@ function Editor() {
     setShowCommands(false);
     setCommandQuery("");
     return true;
-  }, [activeNoteTitle, getStyleForCommand, openedNotePath, runFileCommand]);
+  }, [activeNoteTitle, openedNotePath, runFileCommand]);
 
   const editorExtensions = useMemo(() => [
     markdown(),
@@ -969,16 +844,18 @@ function Editor() {
     EditorView.theme({
       "&": {
         backgroundColor: "transparent",
-        color: "#f2eefc"
+        color: "#ffffff"
       },
       ".cm-content": {
         caretColor: "#c4a7ff",
+        color: "#ffffff",
         fontFamily: "'Inter', 'SF Pro Text', 'Segoe UI', sans-serif",
         fontSize: `${DEFAULT_FONT_SIZE}px`,
         lineHeight: "1.72",
         padding: "44px 0 80px"
       },
       ".cm-line": {
+        color: "#ffffff",
         padding: "0 2px"
       },
       ".cm-cursor": {
