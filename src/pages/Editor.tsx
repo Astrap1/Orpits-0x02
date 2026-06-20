@@ -6,7 +6,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CommandRegistry, TEXT_COLOR_OPTIONS } from "../CommandRegistry";
 import "../styles/Editor.css";
@@ -626,7 +626,7 @@ function Editor() {
   }, []);
 
   const runFileCommand = useCallback(async (
-    commandName: "save" | "export",
+    commandName: "save" | "open" | "export",
     documentText: string,
     title: string,
     currentPath: string | null,
@@ -635,14 +635,45 @@ function Editor() {
     const isTauri = "__TAURI_INTERNALS__" in window;
 
     if (!isTauri) {
-      setFileStatus("Save and export require the desktop app.");
+      setFileStatus("Open, save, and export require the desktop app.");
       setFileStatusKind("error");
       return;
     }
 
     const isSaveCommand = commandName === "save";
+    const isOpenCommand = commandName === "open";
     const extension = isSaveCommand ? "x2" : "pdf";
     let outputPath = currentPath && isSaveCommand ? currentPath : null;
+
+    if (isOpenCommand) {
+      const selectedPath = await open({
+        multiple: false,
+        filters: [
+          {
+            name: "x2 note",
+            extensions: ["x2"]
+          }
+        ]
+      });
+
+      if (!selectedPath || Array.isArray(selectedPath)) {
+        setFileStatus("Open cancelled.");
+        setFileStatusKind("idle");
+        return;
+      }
+
+      try {
+        setFileStatus("Opening .x2 file...");
+        setFileStatusKind("idle");
+        const note = await invoke<LoadedX2Note>("load_x2_note", { path: selectedPath });
+        openLoadedX2Note(note);
+      } catch (error) {
+        setFileStatus(String(error));
+        setFileStatusKind("error");
+      }
+
+      return;
+    }
 
     if (!outputPath) {
       const selectedPath = await save({
@@ -689,7 +720,7 @@ function Editor() {
       setFileStatus(String(error));
       setFileStatusKind("error");
     }
-  }, []);
+  }, [openLoadedX2Note]);
 
   const runCommandAtCursor = useCallback((view: EditorView) => {
     const pendingCommand = getCommandAtCursor(view);
@@ -721,7 +752,7 @@ function Editor() {
       pendingCommand.to
     );
 
-    if (commandName === "save" || commandName === "export") {
+    if (commandName === "save" || commandName === "open" || commandName === "export") {
       view.dispatch({
         changes: {
           from: pendingCommand.from,

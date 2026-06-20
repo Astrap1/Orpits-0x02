@@ -1,4 +1,6 @@
-use printpdf::{BuiltinFont, Mm, PdfDocument, PdfLayerReference};
+use printpdf::{
+    BuiltinFont, Color, IndirectFontRef, Line, Mm, PdfDocument, PdfLayerReference, Point, Rgb,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufWriter;
@@ -12,7 +14,8 @@ const PDF_MARGIN_MM: f32 = 18.0;
 const PDF_TITLE_FONT_SIZE: f32 = 18.0;
 const PDF_BODY_FONT_SIZE: f32 = 11.0;
 const PDF_BODY_LINE_HEIGHT_MM: f32 = 6.0;
-const PDF_BODY_CHARS_PER_LINE: usize = 92;
+const PDF_BODY_MAX_WIDTH_MM: f32 = PDF_PAGE_WIDTH_MM - (PDF_MARGIN_MM * 2.0);
+const PDF_DEFAULT_TEXT_COLOR: &str = "White";
 
 #[derive(Deserialize)]
 struct NotePayload {
@@ -36,6 +39,19 @@ struct TextStyle {
     is_strike: bool,
     #[serde(rename = "isUnderline")]
     is_underline: bool,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self {
+            font_size: "14".to_string(),
+            text_color: PDF_DEFAULT_TEXT_COLOR.to_string(),
+            is_bold: false,
+            is_italic: false,
+            is_strike: false,
+            is_underline: false,
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -76,6 +92,19 @@ struct LoadedX2Note {
     #[serde(rename = "savedAt")]
     saved_at: String,
     path: String,
+}
+
+#[derive(Clone)]
+struct StyledTextSegment {
+    text: String,
+    style: TextStyle,
+}
+
+struct PdfFonts {
+    regular: IndirectFontRef,
+    bold: IndirectFontRef,
+    italic: IndirectFontRef,
+    bold_italic: IndirectFontRef,
 }
 
 #[tauri::command]
@@ -124,8 +153,22 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
         Mm(PDF_PAGE_HEIGHT_MM),
         "Layer 1",
     );
-    let font = document
-        .add_builtin_font(BuiltinFont::Helvetica)
+    let fonts = PdfFonts {
+        regular: document
+            .add_builtin_font(BuiltinFont::Helvetica)
+            .map_err(|error| format!("Could not load PDF font: {error}"))?,
+        bold: document
+            .add_builtin_font(BuiltinFont::HelveticaBold)
+            .map_err(|error| format!("Could not load PDF font: {error}"))?,
+        italic: document
+            .add_builtin_font(BuiltinFont::HelveticaOblique)
+            .map_err(|error| format!("Could not load PDF font: {error}"))?,
+        bold_italic: document
+            .add_builtin_font(BuiltinFont::HelveticaBoldOblique)
+            .map_err(|error| format!("Could not load PDF font: {error}"))?,
+    };
+    let title_font = document
+        .add_builtin_font(BuiltinFont::HelveticaBold)
         .map_err(|error| format!("Could not load PDF font: {error}"))?;
 
     let mut current_layer = document.get_page(page).get_layer(layer);
@@ -136,14 +179,17 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
         PDF_TITLE_FONT_SIZE,
         PDF_MARGIN_MM,
         cursor_y,
-        &font,
+        &title_font,
     );
     cursor_y -= PDF_BODY_LINE_HEIGHT_MM * 2.0;
 
-    for source_line in note.content.lines() {
-        let wrapped_lines = wrap_pdf_line(source_line, PDF_BODY_CHARS_PER_LINE);
+    for styled_line in build_styled_pdf_lines(&note.content, &note.styles) {
+        if styled_line.is_empty() {
+            cursor_y -= PDF_BODY_LINE_HEIGHT_MM;
+            continue;
+        }
 
-        for line in wrapped_lines {
+        for line in wrap_styled_pdf_line(&styled_line, PDF_BODY_MAX_WIDTH_MM) {
             if cursor_y < PDF_MARGIN_MM {
                 let (page, layer) =
                     document.add_page(Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), "Layer");
@@ -151,15 +197,8 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
                 cursor_y = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM;
             }
 
-            write_pdf_line(
-                &current_layer,
-                &line,
-                PDF_BODY_FONT_SIZE,
-                PDF_MARGIN_MM,
-                cursor_y,
-                &font,
-            );
-            cursor_y -= PDF_BODY_LINE_HEIGHT_MM;
+            cursor_y =
+                write_styled_pdf_line(&current_layer, &line, PDF_MARGIN_MM, cursor_y, &fonts);
         }
     }
 
@@ -214,6 +253,271 @@ where
     args.into_iter().find(|argument| is_x2_path(argument))
 }
 
+fn build_styled_pdf_lines(content: &str, styles: &[TextStyleRange]) -> Vec<Vec<StyledTextSegment>> {
+    let mut lines = Vec::new();
+    let mut current_line = Vec::new();
+    let mut current_text = String::new();
+    let mut current_style = TextStyle::default();
+
+    for (byte_index, character) in content.char_indices() {
+        if character == '\n' {
+            if !current_text.is_empty() {
+                current_line.push(StyledTextSegment {
+                    text: std::mem::take(&mut current_text),
+                    style: current_style.clone(),
+                });
+            }
+            lines.push(std::mem::take(&mut current_line));
+            continue;
+        }
+
+        let style = style_at_byte_index(byte_index, styles);
+
+        if !current_text.is_empty() && !text_style_matches(&style, &current_style) {
+            current_line.push(StyledTextSegment {
+                text: std::mem::take(&mut current_text),
+                style: current_style,
+            });
+        }
+
+        current_style = style;
+        current_text.push(character);
+    }
+
+    if !current_text.is_empty() {
+        current_line.push(StyledTextSegment {
+            text: current_text,
+            style: current_style,
+        });
+    }
+
+    lines.push(current_line);
+    lines
+}
+
+fn style_at_byte_index(byte_index: usize, styles: &[TextStyleRange]) -> TextStyle {
+    styles
+        .iter()
+        .rev()
+        .find(|range| range.from <= byte_index && byte_index < range.to)
+        .map(|range| range.style.clone())
+        .unwrap_or_default()
+}
+
+fn text_style_matches(left: &TextStyle, right: &TextStyle) -> bool {
+    left.font_size == right.font_size
+        && left.text_color == right.text_color
+        && left.is_bold == right.is_bold
+        && left.is_italic == right.is_italic
+        && left.is_strike == right.is_strike
+        && left.is_underline == right.is_underline
+}
+
+fn wrap_styled_pdf_line(
+    segments: &[StyledTextSegment],
+    max_width_mm: f32,
+) -> Vec<Vec<StyledTextSegment>> {
+    let mut lines = Vec::new();
+    let mut current_line = Vec::new();
+    let mut current_width = 0.0;
+
+    for segment in segments {
+        for token in split_text_for_wrapping(&segment.text) {
+            let token_width = estimate_pdf_text_width_mm(&token, &segment.style);
+
+            if current_width > 0.0 && current_width + token_width > max_width_mm {
+                lines.push(std::mem::take(&mut current_line));
+                current_width = 0.0;
+            }
+
+            if token_width > max_width_mm && !token.trim().is_empty() {
+                for character in token.chars() {
+                    let text = character.to_string();
+                    let character_width = estimate_pdf_text_width_mm(&text, &segment.style);
+
+                    if current_width > 0.0 && current_width + character_width > max_width_mm {
+                        lines.push(std::mem::take(&mut current_line));
+                        current_width = 0.0;
+                    }
+
+                    current_line.push(StyledTextSegment {
+                        text,
+                        style: segment.style.clone(),
+                    });
+                    current_width += character_width;
+                }
+                continue;
+            }
+
+            current_line.push(StyledTextSegment {
+                text: token,
+                style: segment.style.clone(),
+            });
+            current_width += token_width;
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+
+    lines
+}
+
+fn split_text_for_wrapping(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for character in text.chars() {
+        current.push(character);
+
+        if character.is_whitespace() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+fn write_styled_pdf_line(
+    layer: &PdfLayerReference,
+    segments: &[StyledTextSegment],
+    start_x: f32,
+    y: f32,
+    fonts: &PdfFonts,
+) -> f32 {
+    let mut cursor_x = start_x;
+    let line_height = segments
+        .iter()
+        .map(|segment| pdf_font_size(&segment.style) * 0.43)
+        .fold(PDF_BODY_LINE_HEIGHT_MM, f32::max);
+
+    for segment in segments {
+        if segment.text.is_empty() {
+            continue;
+        }
+
+        let font_size = pdf_font_size(&segment.style);
+        let width = estimate_pdf_text_width_mm(&segment.text, &segment.style);
+        layer.set_fill_color(pdf_color(&segment.style.text_color));
+        layer.use_text(
+            sanitize_pdf_text(&segment.text),
+            font_size,
+            Mm(cursor_x),
+            Mm(y),
+            pdf_font_for_style(&segment.style, fonts),
+        );
+
+        if segment.style.is_underline {
+            draw_pdf_text_rule(layer, cursor_x, y - 1.2, width, &segment.style);
+        }
+
+        if segment.style.is_strike {
+            draw_pdf_text_rule(layer, cursor_x, y + font_size * 0.13, width, &segment.style);
+        }
+
+        cursor_x += width;
+    }
+
+    y - line_height
+}
+
+fn draw_pdf_text_rule(layer: &PdfLayerReference, x: f32, y: f32, width: f32, style: &TextStyle) {
+    layer.set_outline_color(pdf_color(&style.text_color));
+    layer.set_outline_thickness((pdf_font_size(style) / 18.0).max(0.5));
+    layer.add_line(Line {
+        points: vec![
+            (Point::new(Mm(x), Mm(y)), false),
+            (Point::new(Mm(x + width), Mm(y)), false),
+        ],
+        is_closed: false,
+    });
+}
+
+fn pdf_font_for_style<'a>(style: &TextStyle, fonts: &'a PdfFonts) -> &'a IndirectFontRef {
+    match (style.is_bold, style.is_italic) {
+        (true, true) => &fonts.bold_italic,
+        (true, false) => &fonts.bold,
+        (false, true) => &fonts.italic,
+        (false, false) => &fonts.regular,
+    }
+}
+
+fn pdf_font_size(style: &TextStyle) -> f32 {
+    style
+        .font_size
+        .parse::<f32>()
+        .ok()
+        .filter(|size| *size > 0.0)
+        .unwrap_or(PDF_BODY_FONT_SIZE)
+}
+
+fn estimate_pdf_text_width_mm(text: &str, style: &TextStyle) -> f32 {
+    let base_width = pdf_font_size(style) * 0.35;
+    let bold_multiplier = if style.is_bold { 1.06 } else { 1.0 };
+
+    text.chars()
+        .map(|character| {
+            let width_multiplier = if character == ' ' {
+                0.48
+            } else if character.is_ascii_punctuation() {
+                0.62
+            } else if character.is_ascii_uppercase() {
+                1.05
+            } else {
+                1.0
+            };
+
+            base_width * width_multiplier * bold_multiplier
+        })
+        .sum()
+}
+
+fn pdf_color(color: &str) -> Color {
+    let lower_color = color.to_lowercase();
+    let normalized = match lower_color.as_str() {
+        "red" => "#ff8f9b".to_string(),
+        "orange" => "#f59e5b".to_string(),
+        "yellow" => "#f5d76e".to_string(),
+        "green" => "#8ee6a8".to_string(),
+        "blue" => "#7aa2ff".to_string(),
+        "purple" => "#c4a7ff".to_string(),
+        "black" => "#111111".to_string(),
+        "white" => "#f7f2ff".to_string(),
+        value => value.to_string(),
+    };
+
+    let (red, green, blue) = parse_hex_color(&normalized).unwrap_or((17, 17, 17));
+    Color::Rgb(Rgb::new(
+        f32::from(red) / 255.0,
+        f32::from(green) / 255.0,
+        f32::from(blue) / 255.0,
+        None,
+    ))
+}
+
+fn parse_hex_color(color: &str) -> Option<(u8, u8, u8)> {
+    let hex = color.strip_prefix('#')?;
+
+    if hex.len() != 6 {
+        return None;
+    }
+
+    let red = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&hex[4..6], 16).ok()?;
+
+    Some((red, green, blue))
+}
+
 fn write_pdf_line(
     layer: &PdfLayerReference,
     text: &str,
@@ -223,60 +527,6 @@ fn write_pdf_line(
     font: &printpdf::IndirectFontRef,
 ) {
     layer.use_text(sanitize_pdf_text(text), font_size, Mm(x_mm), Mm(y_mm), font);
-}
-
-fn wrap_pdf_line(line: &str, max_chars: usize) -> Vec<String> {
-    if line.trim().is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut wrapped = Vec::new();
-    let mut current = String::new();
-
-    for word in line.split_whitespace() {
-        let separator_len = usize::from(!current.is_empty());
-        if current.chars().count() + separator_len + word.chars().count() > max_chars {
-            if !current.is_empty() {
-                wrapped.push(current);
-                current = String::new();
-            }
-
-            if word.chars().count() > max_chars {
-                wrapped.extend(split_long_word(word, max_chars));
-                continue;
-            }
-        }
-
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-
-    if !current.is_empty() {
-        wrapped.push(current);
-    }
-
-    wrapped
-}
-
-fn split_long_word(word: &str, max_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-
-    for character in word.chars() {
-        if current.chars().count() >= max_chars {
-            chunks.push(current);
-            current = String::new();
-        }
-        current.push(character);
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
-    chunks
 }
 
 fn sanitize_pdf_text(text: &str) -> String {
