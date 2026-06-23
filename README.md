@@ -59,7 +59,7 @@ Fuzzy Search (21 Jul - 27 Jul)
 - The backend requires low-level control for file I/O (saving custom .x2 files) and process execution. Rust guarantees memory safety without a garbage collector, ensuring the desktop app remains fast and free of memory leaks.
 4. Fuse.js
 - A keyboard-only interface lives or dies by its search capability. Fuse.js provides a lightweight, zero-dependency fuzzy search algorithm. This ensures that when a user triggers the command menu, the list filters instantaneously, maintaining the "flow state" of a power user.
-5. OpenAI API
+5. Gemini API
 - Building the \\<prompt> integration requires a reliable LLM backend. Using an established API allows the engineering focus to remain on complex UX challenges, such as asynchronous streaming and graceful degradation, rather than model hosting.
 6. React 19
 - To build the editor's frontend interface as reusable UI components, such as the start page, editor page, toolbar, command menu, and status bar. Its state management is useful for tracking live editor settings like bold, italic, underline, strikethrough, selected font style, font size, and command menu visibility.

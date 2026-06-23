@@ -4,7 +4,8 @@ use printpdf::{
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 
 const X2_FORMAT: &str = "x2pad.note";
 const X2_VERSION: u8 = 1;
@@ -16,6 +17,7 @@ const PDF_BODY_FONT_SIZE: f32 = 11.0;
 const PDF_BODY_LINE_HEIGHT_MM: f32 = 6.0;
 const PDF_BODY_MAX_WIDTH_MM: f32 = PDF_PAGE_WIDTH_MM - (PDF_MARGIN_MM * 2.0);
 const PDF_DEFAULT_TEXT_COLOR: &str = "White";
+const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
 
 #[derive(Deserialize)]
 struct NotePayload {
@@ -23,6 +25,12 @@ struct NotePayload {
     content: String,
     #[serde(default)]
     styles: Vec<TextStyleRange>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct GeminiSettings {
+    #[serde(rename = "apiKey")]
+    api_key: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -207,6 +215,53 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
     document
         .save(&mut BufWriter::new(output))
         .map_err(|error| format!("Could not write PDF file: {error}"))
+}
+
+#[tauri::command]
+fn has_gemini_api_key(app: AppHandle) -> Result<bool, String> {
+    let path = gemini_settings_path(&app)?;
+
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| format!("Could not read Gemini settings: {error}"))?;
+    let settings: GeminiSettings = serde_json::from_str(&content)
+        .map_err(|error| format!("Could not parse Gemini settings: {error}"))?;
+
+    Ok(!settings.api_key.trim().is_empty())
+}
+
+#[tauri::command]
+fn save_gemini_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
+    let api_key = api_key.trim();
+
+    if api_key.is_empty() {
+        return Err("Enter a Gemini API key before saving.".to_string());
+    }
+
+    let path = gemini_settings_path(&app)?;
+    let settings = GeminiSettings {
+        api_key: api_key.to_string(),
+    };
+    let serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|error| format!("Could not prepare Gemini settings: {error}"))?;
+
+    std::fs::write(path, serialized)
+        .map_err(|error| format!("Could not save Gemini settings: {error}"))
+}
+
+fn gemini_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Could not find the app config directory: {error}"))?;
+
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create the app config directory: {error}"))?;
+
+    Ok(directory.join(GEMINI_SETTINGS_FILE))
 }
 
 fn load_x2_note_from_path(path: &Path) -> Result<LoadedX2Note, String> {
@@ -556,7 +611,9 @@ pub fn run() {
             save_x2_note,
             load_x2_note,
             load_startup_x2_note,
-            export_note_pdf
+            export_note_pdf,
+            has_gemini_api_key,
+            save_gemini_api_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

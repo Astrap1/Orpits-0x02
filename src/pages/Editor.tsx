@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import type { KeyboardEvent, MutableRefObject } from "react";
+import type { FormEvent, KeyboardEvent, MutableRefObject } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
@@ -18,6 +18,7 @@ const COMMAND_MENU_PADDING = 16;
 const COMMAND_MENU_ITEM_HEIGHT = 41;
 const COMMANDS_WITH_ARGUMENTS = new Set(["color", "size"]);
 const BULLET_LIST_MARKER = "\u2022 ";
+const BROWSER_GEMINI_API_KEY_STORAGE_KEY = "x2pad.geminiApiKey";
 
 const notes = [
   {
@@ -500,6 +501,7 @@ function Editor() {
   const pendingStyleRestoreRef = useRef<PendingStyleRestore | null>(null);
   const styleRangesRef = useRef<TextStyleRange[]>([]);
   const forcedStyleRangesRef = useRef<TextStyleRange[] | null>(null);
+  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
 
   const [activeNoteId, setActiveNoteId] = useState(initialNote.id);
   const [openedNoteTitle, setOpenedNoteTitle] = useState<string | null>(null);
@@ -517,6 +519,10 @@ function Editor() {
   });
   const [fileStatus, setFileStatus] = useState("Ready");
   const [fileStatusKind, setFileStatusKind] = useState<"idle" | "success" | "error">("idle");
+  const [showApiKeyPrompt, setShowApiKeyPrompt] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiKeyStatus, setApiKeyStatus] = useState("");
+  const [isSavingApiKey, setIsSavingApiKey] = useState(false);
 
   const [selectedFont, setSelectedFont] = useState("Body");
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
@@ -624,6 +630,39 @@ function Editor() {
     setShowCommands(false);
     setCommandQuery("");
   }, []);
+
+  const saveGeminiApiKey = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const trimmedApiKey = apiKeyInput.trim();
+
+    if (!trimmedApiKey) {
+      setApiKeyStatus("Enter a key to continue.");
+      return;
+    }
+
+    setIsSavingApiKey(true);
+    setApiKeyStatus("");
+
+    try {
+      const isTauri = "__TAURI_INTERNALS__" in window;
+
+      if (isTauri) {
+        await invoke("save_gemini_api_key", { apiKey: trimmedApiKey });
+      } else {
+        window.localStorage.setItem(BROWSER_GEMINI_API_KEY_STORAGE_KEY, trimmedApiKey);
+      }
+
+      setApiKeyInput("");
+      setShowApiKeyPrompt(false);
+      setFileStatus("Gemini key saved.");
+      setFileStatusKind("success");
+    } catch (error) {
+      setApiKeyStatus(String(error));
+    } finally {
+      setIsSavingApiKey(false);
+    }
+  }, [apiKeyInput]);
 
   const runFileCommand = useCallback(async (
     commandName: "save" | "open" | "export",
@@ -1005,6 +1044,36 @@ function Editor() {
     const isTauri = "__TAURI_INTERNALS__" in window;
 
     if (!isTauri) {
+      setShowApiKeyPrompt(!window.localStorage.getItem(BROWSER_GEMINI_API_KEY_STORAGE_KEY));
+      return;
+    }
+
+    void invoke<boolean>("has_gemini_api_key")
+      .then((hasApiKey) => {
+        setShowApiKeyPrompt(!hasApiKey);
+      })
+      .catch((error) => {
+        setApiKeyStatus(String(error));
+        setShowApiKeyPrompt(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!showApiKeyPrompt) {
+      return;
+    }
+
+    const animationFrame = requestAnimationFrame(() => {
+      apiKeyInputRef.current?.focus();
+    });
+
+    return () => cancelAnimationFrame(animationFrame);
+  }, [showApiKeyPrompt]);
+
+  useEffect(() => {
+    const isTauri = "__TAURI_INTERNALS__" in window;
+
+    if (!isTauri) {
       return;
     }
 
@@ -1203,6 +1272,58 @@ function Editor() {
           </section>
         </main>
       </div>
+
+      {showApiKeyPrompt && (
+        <div className="api-key-overlay">
+          <form className="api-key-bubble" onSubmit={saveGeminiApiKey}>
+            <div className="api-key-bubble-header">
+              <span>Gemini API key</span>
+              <button
+                type="button"
+                className="api-key-dismiss"
+                onClick={() => {
+                  setApiKeyStatus("");
+                  setShowApiKeyPrompt(false);
+                }}
+                aria-label="Dismiss"
+              >
+                <span />
+              </button>
+            </div>
+            <input
+              ref={apiKeyInputRef}
+              type="password"
+              value={apiKeyInput}
+              placeholder="Paste key"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => {
+                setApiKeyInput(event.target.value);
+                setApiKeyStatus("");
+              }}
+            />
+            {apiKeyStatus && (
+              <div className="api-key-status" role="status">
+                {apiKeyStatus}
+              </div>
+            )}
+            <div className="api-key-actions">
+              <button type="submit" disabled={isSavingApiKey}>
+                {isSavingApiKey ? "Saving..." : "Save key"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setApiKeyStatus("");
+                  setShowApiKeyPrompt(false);
+                }}
+              >
+                Later
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
