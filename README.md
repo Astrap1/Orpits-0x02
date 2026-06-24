@@ -20,7 +20,7 @@ To build a keyboard-first note-taking editor where structure, computation, and A
 The Notepad (18 May - 31 May)
 - Blank page for users to type
 - Has all the standard features with good markup system
-- Able to save and export (.x2 format)
+- Able to save notes in `.x2` format and export them as PDF files
 
 # Feature 2
 The // Registry (1 Jun - 11 Jun)
@@ -29,10 +29,10 @@ The // Registry (1 Jun - 11 Jun)
 - //cmd
 
 # Feature 3
-The \\ Registry (12 Jun - 29 Jun)
+The `\\` Registry (12 Jun - 29 Jun)
 - AI search
 - Generate suggestions or answer questions user has
-- \\prompt
+- `\\<prompt>`
 
 # Feature 4
 Code Box (1 Jul - 10 Jul)
@@ -47,26 +47,26 @@ Tables (11 Jul - 20 Jul)
 # Feature 6
 Fuzzy Search (21 Jul - 27 Jul)
 - Gives suggestions when users type //
-- Given in dropbox format, and users can select using up/down arrows
+- Displayed in a dropdown menu, with selection controlled using the up and down arrow keys
 - Eliminates need to memorise commands
 
 # Tech Stack
 1. Tauri V2
 - Relies on the operating system's native webview, resulting in a significantly smaller application size and faster startup times
 2. CodeMirror 6
-- Standard text areas cannot support a "CLI within a Doc" experience. CodeMirror provides a highly modular state architecture that allows for the creation of custom parsers. This is essential for detecting specific character sequences (like // or \\) in real-time without lagging the editor.
+- Standard text areas cannot support a "CLI within a Doc" experience. CodeMirror provides a highly modular state architecture that allows for the creation of custom parsers. This is essential for detecting specific character sequences (like // or `\\`) in real-time without lagging the editor.
 3. Rust
 - The backend requires low-level control for file I/O (saving custom .x2 files) and process execution. Rust guarantees memory safety without a garbage collector, ensuring the desktop app remains fast and free of memory leaks.
 4. Fuse.js
 - A keyboard-only interface lives or dies by its search capability. Fuse.js provides a lightweight, zero-dependency fuzzy search algorithm. This ensures that when a user triggers the command menu, the list filters instantaneously, maintaining the "flow state" of a power user.
 5. Gemini API
-- Building the \\<prompt> integration requires a reliable LLM backend. Using an established API allows the engineering focus to remain on complex UX challenges, such as asynchronous streaming and graceful degradation, rather than model hosting.
+- Building the `\\<prompt>` integration requires a reliable LLM backend. Using an established API allows the engineering focus to remain on complex UX challenges, such as asynchronous streaming and graceful degradation, rather than model hosting.
 6. React 19
-- To build the editor's frontend interface as reusable UI components, such as the start page, editor page, toolbar, command menu, and status bar. Its state management is useful for tracking live editor settings like bold, italic, underline, strikethrough, selected font style, font size, and command menu visibility.
+- To build the editor's frontend interface as reusable UI components, such as the editor page, sidebar, toolbar, command menu, and status bar. Its state management is useful for tracking live editor settings like bold, italic, underline, strikethrough, selected font style, font size, and command menu visibility.
 7. TypeScript 
 - TypeScript adds static type checking on top of JavaScript, which helps reduce bugs as the command system grows more complex. 
 8. CSS
-- To define the visual design and layout of the application, including the dark editor theme, title bar, toolbar, formatting buttons, command menu, editor container, and status bar.
+- To define the visual design and layout of the application, including the dark editor theme, title bar, toolbar, command menu, editor container, and status bar.
 
 # Design Ideas
 ![main editor](project-docs/01_windows_obsidian_main_editor.png)
@@ -107,38 +107,41 @@ Fuzzy Search (21 Jul - 27 Jul)
 </table>
 
 # .x2 Note Format
-The .x2 file format will be our local-first storage format for notes created in the editor. Instead of saving only plain text, the .x2 file will preserve the note content, formatting, command-generated blocks, tables, code boxes, and metadata needed to reopen the note exactly as the user left it.
+The `.x2` file format is the local-first storage format used by x2pad. It allows notes to be saved directly to the user's device while preserving the note text and the formatting ranges applied through the editor.
 
-The save process would work like this:
-1. The user writes normally in the editor and may use commands such as `//bold`, `//table`, `//code`, or `\\<prompt>`.
-2. The editor keeps an internal document model that represents the note as structured blocks instead of only raw text.
-3. When the user runs //save, the app converts the current document model into the `.x2` file structure.
-4. The Rust/Tauri backend writes the .x2 file to the user's local device.
-5. When the user opens the file again, the app reads the .x2 file, validates the version, rebuilds the document model, and renders it back into the editor.
+For the current version, `.x2` files are stored as JSON. This makes the format readable, easy to debug, and simple to parse from both the React frontend and the Rust/Tauri backend.
 
-Internally, the .x2 file should be structured data, most likely JSON for the first version because it is readable, easy to debug, and simple to parse from both TypeScript and Rust. The file would include:
-- format: Identifies the file as an .x2 note file.
-- version: Tracks the format version so future versions can remain backwards compatible.
-- metadata: Stores details such as the note title, created date, updated date, app version, and optional tags.
-- settings: Stores note-level preferences such as font size, colors, styles etc.
-- blocks: Stores the actual note content as an ordered list of blocks.
+The save process works like this:
+1. The user writes normally in the editor and may apply commands such as `//bold`, `//header`, `//color`, or `//size`.
+2. The editor stores the note content as text and tracks formatting as style ranges.
+3. When the user runs `//save`, the app removes the command text from the editor and sends the note title, content, and style ranges to the Rust/Tauri backend.
+4. The backend converts the note into the `.x2` JSON structure and writes it to the user's local device.
+5. When the user runs `//open`, the app reads the selected `.x2` file, validates its format and version, reloads the note content, and reapplies the saved style ranges in the editor.
+
+The current `.x2` file includes:
+- `format`: Identifies the file as an x2pad note file.
+- `version`: Tracks the file format version so future versions can remain compatible.
+- `title`: Stores the note title.
+- `content`: Stores the note text as a single string.
+- `styles`: Stores formatting ranges such as font size, colour, bold, italic, strikethrough, and underline.
+- `savedAt`: Stores the timestamp for when the note was last saved.
+
+This gives the app a working persistence layer for the current editor features. In future versions, the `.x2` format can be expanded to support richer structured blocks for tables, code boxes, AI-generated content, and additional metadata.
 
 # Architecture
 ![architecture](project-docs/architecture.jpg)
 
 # Current Milestone Objectives
-For the current milestone, our main objective is to build the foundation of the note-taking editor before adding more advanced command, AI, code execution, and table features. This milestone focuses on proving that the editor can support a keyboard-first workflow and basic rich text formatting.
+For the current milestone, our main objective is to complete the core `//` command registry and begin building the `\\` AI registry
 
 The milestone objectives are:
-- Build a working desktop editor screen using the Tauri, React, TypeScript, and CodeMirror stack.
-- Create the general UI layout for the editor, including a title bar, toolbar, main writing area, and status bar.
-- Implement a basic text editor that users can type into continuously.
-- Support early formatting commands through the `//` command pattern.
-- Implement text style commands for title, header, body, bold, italic, strikethrough, and underline.
-- Set up a command registry so future commands can be added in one place.
+- Complete the core `//` command registry
+- Improve the command menu so it filters commands as the user types (not exactly the fuzzy search feature yet)
+- Add note persistence, including saving and loading `.x2` files
+- Refine the editor UI based on prototype testing and user feedback
 
 # Current Milestone Progress
-In this milestone, we completed the first usable version of the editor interface. The editor supports typing into a CodeMirror-based writing area. Users can apply formatting using toolbar controls, and some formatting can also be triggered through typed commands. The current implemented `//` commands include:
+In this milestone, we completed a usable version of the editor interface. The editor supports continuous typing in a CodeMirror-based writing area, and users can apply formatting or insert content through typed commands from the command registry. The current implemented `//` commands include:
 - `//title` to switch to title-sized text
 - `//header` to switch to header-sized text
 - `//body` to return to body-sized text
@@ -147,7 +150,19 @@ In this milestone, we completed the first usable version of the editor interface
 - `//strike` to enable strikethrough text
 - `//underline` to enable underlined text
 - `//default` to reset text formatting
-This gives us an early proof of concept for the "CLI within a Doc" idea. Instead of relying only on mouse-based toolbar actions, users can begin controlling the editor by typing commands directly into the document.
+- `//size` to adjust the text size
+- `//color` to change the text color
+- `//bulletlist` to add bullet points
+- `//numberlist` to start a numbered list
+- `//date` to add the date
+- `//time` to add the time
+- `//wordcount` to insert the current word count
+- `//save` to save the document in .x2 format
+- `//export` to export the document in PDF format
+
+The command menu also filters available commands as the user types, making the keyboard-first workflow easier to discover.
+
+We also worked on the first usable version of the AI engine, using the `\\` command.
 
 # Software Engineering Evidence
 1. Modular frontend structure
@@ -158,16 +173,13 @@ This gives us an early proof of concept for the "CLI within a Doc" idea. Instead
 - The project is split into milestones and features. We are building the editor foundation first, then adding commands, AI, code boxes, tables, and fuzzy search in later stages.
 
 # Next Milestone Objectives
-For the next milestone, we plan to expand the `//` command system from basic formatting into a more complete command workflow.
+For the next milestone, we plan to implement the `//code` and `//table` features.
 
 The next milestone objectives are:
-- Improve the command menu so it can filter and suggest commands as the user types.
-- Implement more `//` commands, such as list creation, line breaks, inserting date/time, word count insertion, save, and export.
-- Begin implementing table creation commands.
-- Add persistence for notes, including saving and loading `.x2` files.
-- Improve error handling for invalid or incomplete commands.
-- Add basic tests or manual QA checklists for editor typing, command execution, and formatting behaviour.
-- Refine the UI based on feedback from testing the current editor prototype.
+- Implement a fully functional `//table` command
+- Add table formulas such as SUM, AVERAGE, MIN, MAX, and COUNT
+- Implement a fully functional `//code` command
+- Add code boxes that can run at least Python and C++ snippets
 
 # Challenges Faced
 1. Balancing keyboard-first design with discoverability
@@ -183,7 +195,7 @@ The next milestone objectives are:
 2. Cross-format Integration Testing
 - Ensuring that all features are able to work together without conflicts
 3. Stress-testing
-- Load large files into the app (10000+ lines) into the app to check for responsiveness
+- Load large files into the app, such as notes with 10,000+ lines, to check responsiveness
 4. Edge-case Input Testing
 - Inputting non-standard text inputs, checking that they do not run as code
 5. Pilot Testing
