@@ -1,8 +1,26 @@
+# x2pad
+Team Name: 0x02
+
+Proposed Level of Achievement: Apollo 11
+
+Poster: 
+
+Video: 
+
+Github Repo: 
+
+App Download: 
+
 # Motivation
 Modern note-taking apps often prioritise a "click-heavy" visual interface that disrupts the "flow state" of power users. For developers and students, the constant context-switching between the keyboard and mouse is an ergonomic bottleneck that slows down thought-to-text translation.
 
 # Aim
 To build a keyboard-first note-taking editor where structure, computation, and AI assistance can be triggered without leaving the typing flow. By utilizing a "Command-Line Interface (CLI) within a Doc" approach, we hope to provide a seamless experience where structural changes, code execution, and AI assistance are all triggered via the home row. The best part of this would be that it will all be done without the need to memorise any keyboard shortcuts!
+
+# What sets us apart?
+Most applications force the user to choose between speed and design, offering either a lightning-fast, keyboard-driven tool burdened by a steep learning curve, or a beautiful, minimalist workspace that requires breaking concentration to navigate click-heavy menus. Furthermore, while traditional productivity apps attempt to solve this with keyboard shortcuts, they disrupt the flow state by relying on rigid memorization of complex key combinations like `Ctrl+Shift+K`. x2pad bridges this gap by introducing a completely friction-free, conversational approach to the document editor. Through its built-in command registry, the application allows users to simply type what they need without their hands ever leaving the home row. 
+
+Ultimately, it delivers the zero-mouse execution speed of an advanced developer tool while entirely removing the cognitive load required to access its features, all wrapped in a polished, translucent interface that feels natively premium.
 
 # User Stories
 1. The Focused Student
@@ -51,22 +69,34 @@ Fuzzy Search (21 Jul - 27 Jul)
 - Eliminates need to memorise commands
 
 # Tech Stack
-1. Tauri V2
-- Relies on the operating system's native webview, resulting in a significantly smaller application size and faster startup times
-2. CodeMirror 6
-- Standard text areas cannot support a "CLI within a Doc" experience. CodeMirror provides a highly modular state architecture that allows for the creation of custom parsers. This is essential for detecting specific character sequences (like // or `\\`) in real-time without lagging the editor.
-3. Rust
-- The backend requires low-level control for file I/O (saving custom .x2 files) and process execution. Rust guarantees memory safety without a garbage collector, ensuring the desktop app remains fast and free of memory leaks.
+
+## Frontend
+
+1. React 19
+- Used to build the editor interface as reusable UI components, including the editor page, sidebar, toolbar, command menu, and status bar. Its state management is useful for tracking live editor settings such as bold, italic, underline, strikethrough, selected font style, font size, and command menu visibility.
+
+2. TypeScript
+- Adds static type checking on top of JavaScript, helping reduce bugs as the command system grows more complex.
+
+3. CodeMirror 6
+- Powers the main text editor. Standard text areas cannot support a "CLI within a Doc" experience, so CodeMirror's modular state architecture is essential for detecting specific character sequences like `//` or `\\` in real time without lagging the editor.
+
 4. Fuse.js
-- A keyboard-only interface lives or dies by its search capability. Fuse.js provides a lightweight, zero-dependency fuzzy search algorithm. This ensures that when a user triggers the command menu, the list filters instantaneously, maintaining the "flow state" of a power user.
-5. Gemini API
-- Building the `\\<prompt>` integration requires a reliable LLM backend. Using an established API allows the engineering focus to remain on complex UX challenges, such as asynchronous streaming and graceful degradation, rather than model hosting.
-6. React 19
-- To build the editor's frontend interface as reusable UI components, such as the editor page, sidebar, toolbar, command menu, and status bar. Its state management is useful for tracking live editor settings like bold, italic, underline, strikethrough, selected font style, font size, and command menu visibility.
-7. TypeScript 
-- TypeScript adds static type checking on top of JavaScript, which helps reduce bugs as the command system grows more complex. 
-8. CSS
-- To define the visual design and layout of the application, including the dark editor theme, title bar, toolbar, command menu, editor container, and status bar.
+- Provides lightweight fuzzy search for the command menu. This ensures that when a user triggers the command menu, the list filters instantaneously, maintaining the "flow state" of a power user.
+
+5. CSS
+- Defines the visual design and layout of the application, including the dark editor theme, title bar, toolbar, command menu, editor container, and status bar.
+
+## Backend / Desktop Layer
+
+1. Tauri V2
+- Packages x2pad as a lightweight desktop application by relying on the operating system's native webview, resulting in a significantly smaller application size and faster startup times.
+
+2. Rust
+- Handles backend logic such as file I/O, saving custom `.x2` files, exporting documents, and process execution. Rust guarantees memory safety without a garbage collector, ensuring the desktop app remains fast and free of memory leaks.
+
+3. Gemini API
+- Powers the `\\<prompt>` AI assistant feature. Using an established API allows the engineering focus to remain on complex UX challenges, such as asynchronous streaming and graceful degradation, rather than model hosting.
 
 # Design Ideas
 ![main editor](project-docs/01_windows_obsidian_main_editor.png)
@@ -190,16 +220,90 @@ The next milestone objectives are:
 - Since commands are typed directly into the document, the editor must distinguish between normal text and intentional commands like `//bold` or `//code`.
 
 # Test & Quality Assurance Ideas
-1. Sandboxing
-- Isolated testing environment to ensure working features
-2. Cross-format Integration Testing
-- Ensuring that all features are able to work together without conflicts
-3. Stress-testing
-- Load large files into the app, such as notes with 10,000+ lines, to check responsiveness
-4. Edge-case Input Testing
-- Inputting non-standard text inputs, checking that they do not run as code
-5. Pilot Testing
-- Distributing the application to a cohort of 10+ target users to evaluate the effectiveness of the "mouseless" workflow in real-world note-taking scenarios.
+
+## 1. Command Registry Testing
+We will test each `//` command to ensure that it produces the expected editor behaviour and does not accidentally affect unrelated text.
+
+Example test cases:
+- Typing `//bold` enables bold formatting for newly typed text.
+- Typing `//date` inserts the current date correctly.
+- Typing `//wordcount` returns an accurate word count.
+- Typing an invalid command does not unexpectedly modify the document.
+- Executed commands are removed from the editor after they run.
+
+This is important because the command registry is the core interaction model of x2pad. If commands behave inconsistently, the keyboard-first workflow becomes unreliable.
+
+## 2. `.x2` File Persistence Testing
+We will test whether notes can be saved and reopened correctly using the `.x2` file format.
+
+Example test cases:
+- Save a note with plain text and reopen it.
+- Save a note with bold, italic, underline, strikethrough, colour, and font size formatting.
+- Check that saved files preserve the note title, content, style ranges, and timestamp.
+- Open a corrupted or invalid `.x2` file and ensure the app handles it gracefully.
+- Save multiple notes and confirm that each file can be opened independently.
+
+This ensures that users do not lose their work and that x2pad's local-first storage remains reliable.
+
+## 3. Cross-Feature Integration Testing
+We will test whether different editor features work correctly together, instead of only testing each feature in isolation.
+
+Example test cases:
+- Apply formatting, save the file, reopen it, and confirm the formatting is still present.
+- Use multiple commands in the same document without conflicts.
+- Combine AI-generated text with manually formatted text.
+- Insert date, time, word count, and formatting commands in one note.
+- Export a saved note and check that the exported output matches the editor content.
+
+This helps ensure that features continue to work properly when combined in a realistic writing workflow.
+
+## 4. Edge-Case Input Testing
+We will test unusual or unexpected user inputs to prevent crashes, accidental command execution, or broken formatting.
+
+Example test cases:
+- Typing `//` in a normal sentence without intending to run a command.
+- Typing incomplete commands such as `//bo` or `//col`.
+- Pasting long paragraphs into the editor.
+- Typing special characters, symbols, and mixed-language text.
+- Using command-like text inside future code boxes without triggering editor commands accidentally.
+
+This is important because commands are typed directly into the document, so the editor must distinguish between normal writing and intentional actions.
+
+## 5. Performance and Stress Testing
+We will test how the editor performs with large documents and repeated user actions.
+
+Example test cases:
+- Open notes with 10,000+ lines.
+- Type continuously in a large document and check for input lag.
+- Trigger the command menu in a large file.
+- Save and reopen large `.x2` files.
+- Repeatedly apply formatting commands to check that the editor remains responsive.
+
+This ensures that x2pad remains smooth enough for real note-taking, long-form writing, and heavy usage.
+
+## 6. AI Feature Testing
+We will test the `\\` AI registry to ensure that AI responses are useful, stable, and handled safely.
+
+Example test cases:
+- Submit a normal writing prompt and check that a response appears.
+- Submit an empty prompt and show an appropriate error.
+- Handle slow API responses with a loading state.
+- Handle failed API requests without crashing the editor.
+- Confirm that AI-generated content is inserted into the correct location in the document.
+
+This ensures that the AI feature supports the writing flow without making the editor unreliable.
+
+## 7. Pilot Testing
+We will distribute the application to a small group of target users, such as students and developers, to evaluate the effectiveness of the keyboard-first workflow in real-world note-taking scenarios.
+
+Example testing approach:
+- Ask users to take notes using only keyboard commands.
+- Observe whether users can discover commands through the command menu.
+- Collect feedback on speed, clarity, comfort, and ease of use.
+- Compare the experience against traditional mouse-based note-taking tools.
+- Record common pain points and use them to refine the command registry and editor interface.
+
+This helps validate whether x2pad achieves its main goal of reducing mouse usage and preserving the user's flow state.
 
 # Note
 For the current state of our app, only the windows version is available. However, for our final product, we would like to create a mac version as well.
