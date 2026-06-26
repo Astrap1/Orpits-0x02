@@ -7,7 +7,7 @@ Poster:
 
 Video: 
 
-Github Repo: 
+GitHub Repo: 
 
 App Download: 
 
@@ -41,7 +41,7 @@ This is the foundation of x2pad. It provides users with a clean writing space wh
 The main editor is built using CodeMirror 6, which provides a flexible text-editing engine. Instead of relying on a standard HTML text area, CodeMirror allows x2pad to track editor state, cursor position, formatting ranges, and command input more precisely.
 
 ## 2. The `//` Registry (1 Jun - 11 Jun)
-This is the main interaction system of x2pad. It allows users to perform actions by typing commands directly into the document instead of clicking toolbar buttons or memorising keyboard shortcuts. THis supports the main goal of x2pad: keeping users in their typing flow.
+This is the main interaction system of x2pad. It allows users to perform actions by typing commands directly into the document instead of clicking toolbar buttons or memorising keyboard shortcuts. This supports the main goal of x2pad: keeping users in their typing flow.
 
 The command registry is stored centrally in `src/CommandRegistry.ts`, making it easier to add, update, or remove commands without scattering command logic throughout the application.
 
@@ -51,9 +51,9 @@ When the user types `//`, the editor detects that a command may be starting and 
 Eg. typing `//bo` may suggest `//bold`, while typing `//date` can trigger the insertion of the current date.
 
 ## 3. The `\\` Registry (12 Jun - 29 Jun)
-The `\\` registry is designed to provide AI assistance directly inside the editor. Instead of copying text into a seperate chatbot or browser window, users can ask for help while staying inside their notes.
+The `\\` registry is designed to provide AI assistance directly inside the editor. Instead of copying text into a separate chatbot or browser window, users can ask for help while staying inside their notes.
 
-This feature supports use cases such as idea expansion, summarisation, rewritting, explanation and study assistance. The AI workflow is intended to feel like a natural extension of typing, rather than a separate tool.
+This feature supports use cases such as idea expansion, summarisation, rewriting, explanation and study assistance. The AI workflow is intended to feel like a natural extension of typing, rather than a separate tool.
 
 ### How It Works
 When the user types `\\` followed by a prompt, x2pad treats the input as an AI request. The prompt is sent to the Gemini API, and the response can be inserted back into the editor.
@@ -187,7 +187,7 @@ The current `.x2` file includes:
 - `version`: Tracks the file format version so future versions can remain compatible.
 - `title`: Stores the note title.
 - `content`: Stores the note text as a single string.
-- `styles`: Stores formatting ranges such as font size, colour, bold, italic, strikethrough, and underline.
+- `styles`: Stores formatting ranges such as font size, color, bold, italic, strikethrough, and underline.
 - `savedAt`: Stores the timestamp for when the note was last saved.
 
 This gives the app a working persistence layer for the current editor features. In future versions, the `.x2` format can be expanded to support richer structured blocks for tables, code boxes, AI-generated content, and additional metadata.
@@ -209,7 +209,7 @@ The frontend handles:
 - Managing editor state such as text content, cursor position, and formatting
 - Detecting typed commands such as `//bold`, `//save`, and `\\<prompt>`
 - Filtering command suggestions as the user types
-- Applying visual formatting such as bold, italic, underline, strikethrough, font size, and colour
+- Applying visual formatting such as bold, italic, underline, strikethrough, font size, and color
 - Sending save, export, and AI requests to the backend when needed
 
 CodeMirror 6 is especially important because it gives x2pad more control than a normal text area. It allows the app to track document changes, command triggers, and formatting behaviour in a more structured way.
@@ -245,7 +245,7 @@ A typical `//` command flow works like this:
 8. The command text is removed from the document.
 9. The editor updates the document state or formatting.
 
-For example, when the user types `//bold`, x2pad recognises the command, removes `//bold` from the editor, and enables bold formatting for the next text the user types.
+Eg. when the user types `//bold`, x2pad recognises the command, removes `//bold` from the editor, and enables bold formatting for the next text the user types.
 
 This design keeps the user in the typing flow because they do not need to stop and search through menus or memorise complex keyboard shortcuts.
 
@@ -355,91 +355,150 @@ The next milestone objectives are:
 3. Avoiding conflicts between normal typing and commands
 - Since commands are typed directly into the document, the editor must distinguish between normal text and intentional commands like `//bold` or `//code`.
 
-# Test & Quality Assurance Ideas
+# User Testing and Validation
 
-## 1. Command Registry Testing
-We will test each `//` command to ensure that it produces the expected editor behaviour and does not accidentally affect unrelated text.
+## Testing Done So Far
 
-Example test cases:
-- Typing `//bold` enables bold formatting for newly typed text.
-- Typing `//date` inserts the current date correctly.
-- Typing `//wordcount` returns an accurate word count.
-- Typing an invalid command does not unexpectedly modify the document.
-- Executed commands are removed from the editor after they run.
+### 1. Command Registry Testing
+We tested the `//` command registry to check that commands produce the expected editor behaviour and do not accidentally affect unrelated text.
+
+Test scenarios included:
+- Typing `//bold` to enable bold formatting for newly typed text
+- Typing `//date` to insert the current date
+- Typing `//wordcount` to return the current word count
+- Typing invalid commands that are not in the command registry
+- Checking that executed commands are removed from the editor after they run
+
+From these tests, we checked whether:
+- Commands executed correctly
+- Invalid commands were ignored safely
+- The command menu behaved predictably
+- Command text was removed after execution
+- The editor remained usable after commands were run
 
 This is important because the command registry is the core interaction model of x2pad. If commands behave inconsistently, the keyboard-first workflow becomes unreliable.
 
-## 2. `.x2` File Persistence Testing
-We will test whether notes can be saved and reopened correctly using the `.x2` file format.
+### 2. `.x2` File Persistence Testing
+We tested whether notes can be saved and reopened correctly using the `.x2` file format.
 
-Example test cases:
-- Save a note with plain text and reopen it.
-- Save a note with bold, italic, underline, strikethrough, colour, and font size formatting.
-- Check that saved files preserve the note title, content, style ranges, and timestamp.
-- Open a corrupted or invalid `.x2` file and ensure the app handles it gracefully.
-- Save multiple notes and confirm that each file can be opened independently.
+Test scenarios included:
+- Saving a note with plain text and reopening it
+- Saving a note with formatting such as bold, italic, underline, strikethrough, color, and font size changes
+- Checking that saved files preserve the note title, content, style ranges, and timestamp
+- Saving multiple notes and confirming that each file can be opened independently
+- Opening invalid or unexpected files to check that the app handles them gracefully
 
-This ensures that users do not lose their work and that x2pad's local-first storage remains reliable.
+From these tests, we checked whether:
+- Notes were saved successfully
+- Saved content could be loaded back into the editor
+- Formatting information was preserved where supported
+- Invalid files did not crash the app
+- Local-first storage behaved reliably
 
-## 3. Cross-Feature Integration Testing
-We will test whether different editor features work correctly together, instead of only testing each feature in isolation.
+This ensures that users do not lose their work and that x2pad's local file format can support the current editor features.
 
-Example test cases:
-- Apply formatting, save the file, reopen it, and confirm the formatting is still present.
-- Use multiple commands in the same document without conflicts.
-- Combine AI-generated text with manually formatted text.
-- Insert date, time, word count, and formatting commands in one note.
-- Export a saved note and check that the exported output matches the editor content.
+### 3. Cross-Feature Integration Testing
+We tested whether different editor features work correctly together, instead of only testing each feature in isolation.
 
-This helps ensure that features continue to work properly when combined in a realistic writing workflow.
+Test scenarios included:
+- Applying formatting, saving the file, reopening it, and checking that the content is still present
+- Using multiple commands in the same document without conflicts
+- Inserting date, time, word count, and formatting commands in one note
+- Exporting a saved note and checking that the exported output matches the editor content
+- Combining AI-generated text with manually written notes
 
-## 4. Edge-Case Input Testing
-We will test unusual or unexpected user inputs to prevent crashes, accidental command execution, or broken formatting.
+From these tests, we checked whether:
+- Features continued to work when used together
+- One command did not break another command
+- Saved and exported content matched the editor state
+- The writing workflow remained smooth across multiple actions
 
-Example test cases:
-- Typing `//` in a normal sentence without intending to run a command.
-- Typing incomplete commands such as `//bo` or `//col`.
-- Pasting long paragraphs into the editor.
-- Typing special characters, symbols, and mixed-language text.
-- Using command-like text inside future code boxes without triggering editor commands accidentally.
+This helps ensure that x2pad works as a complete editor, not just as a set of isolated features.
 
-This is important because commands are typed directly into the document, so the editor must distinguish between normal writing and intentional actions.
+### 4. Stress Testing
+We tested the editor with larger amounts of text to check whether the app remains responsive during normal writing and editing.
 
-## 5. Performance and Stress Testing
-We will test how the editor performs with large documents and repeated user actions.
+The purpose of this test was to ensure that x2pad can handle longer notes without noticeable input lag, since students and developers may write long documents during lectures, study sessions, or project planning.
 
-Example test cases:
-- Open notes with 10,000+ lines.
-- Type continuously in a large document and check for input lag.
-- Trigger the command menu in a large file.
-- Save and reopen large `.x2` files.
-- Repeatedly apply formatting commands to check that the editor remains responsive.
+Test scenarios included:
+- Typing continuously in the editor
+- Pasting longer blocks of text into the editor
+- Using formatting commands after the document becomes longer
+- Opening the command menu after the document contains more content
+- Saving and reopening larger `.x2` files
+- Repeatedly applying formatting commands to check that the editor remains responsive
 
-This ensures that x2pad remains smooth enough for real note-taking, long-form writing, and heavy usage.
+From these tests, we checked whether:
+- Typing remained smooth
+- The command menu still appeared quickly
+- Formatting commands still worked correctly
+- The editor did not freeze or crash
 
-## 6. AI Feature Testing
-We will test the `\\` AI registry to ensure that AI responses are useful, stable, and handled safely.
+This ensures that x2pad remains smooth enough for real note-taking, long-form writing, and heavier usage.
 
-Example test cases:
-- Submit a normal writing prompt and check that a response appears.
-- Submit an empty prompt and show an appropriate error.
-- Handle slow API responses with a loading state.
-- Handle failed API requests without crashing the editor.
-- Confirm that AI-generated content is inserted into the correct location in the document.
+### 5. Edge-Case Input Testing
+We also tested unusual input cases to ensure that typed commands do not accidentally interfere with normal writing.
+
+The purpose of this test was to check whether x2pad can distinguish between normal text and intentional commands, since commands are typed directly into the document.
+
+Test scenarios included:
+- Typing `//` without completing a command
+- Typing incomplete commands such as `//bo` or `//col`
+- Typing invalid commands that are not in the command registry
+- Typing command-like text as part of normal notes
+- Pasting text that contains `//` or `\\`
+- Using special characters and symbols in the editor
+- Using command-like text inside future code boxes without triggering editor commands accidentally
+
+From these tests, we checked whether:
+- Invalid commands were ignored safely
+- The editor did not crash
+- Normal writing was not accidentally deleted
+- The command menu behaved predictably
+- Users could continue typing after an incomplete or invalid command
+
+### 6. AI Feature Testing
+We tested the `\\` AI registry to check whether AI prompts can be triggered from inside the editor and handled without breaking the writing flow.
+
+Test scenarios included:
+- Submitting a normal writing prompt and checking that a response appears
+- Submitting an empty or incomplete prompt
+- Handling slow AI responses with a visible waiting state
+- Handling failed AI requests without crashing the editor
+- Confirming that AI-generated content can be inserted into the correct location in the document
+
+From these tests, we checked whether:
+- The AI command was detected correctly
+- The editor collected the prompt and document context properly
+- The app handled missing or invalid Gemini API key situations
+- AI responses could be accepted, moved, or cancelled without disrupting the note
+- The user could continue writing after the AI interaction
 
 This ensures that the AI feature supports the writing flow without making the editor unreliable.
 
-## 7. Pilot Testing
-We will distribute the application to a small group of target users, such as students and developers, to evaluate the effectiveness of the keyboard-first workflow in real-world note-taking scenarios.
+## Planned User Testing for Next Milestone
+For the next milestone, we plan to distribute x2pad to a small group of friends and classmates for pilot testing. This will help us evaluate the app in more realistic note-taking situations.
 
-Example testing approach:
-- Ask users to take notes using only keyboard commands.
-- Observe whether users can discover commands through the command menu.
-- Collect feedback on speed, clarity, comfort, and ease of use.
-- Compare the experience against traditional mouse-based note-taking tools.
-- Record common pain points and use them to refine the command registry and editor interface.
+The goal of this user testing is to find out whether the keyboard-first workflow is actually intuitive for new users, not just for the development team.
 
-This helps validate whether x2pad achieves its main goal of reducing mouse usage and preserving the user's flow state.
+We plan to ask testers to complete tasks such as:
+- Create a new note
+- Apply formatting using `//bold`, `//header`, and `//color`
+- Insert the date or time using a command
+- Save the note as a `.x2` file
+- Export the note as a PDF
+- Try the `\\` AI prompt feature if available
+- Give feedback on whether the command menu is easy to understand
+
+We will collect feedback on:
+- Ease of learning the command system
+- Whether users prefer typing commands over clicking buttons
+- Whether the command menu helps with discoverability
+- Any confusing or unexpected behaviour
+- Any bugs, crashes, or performance issues
+- Suggestions for future commands or interface improvements
+
+This feedback will help us decide what to improve before implementing larger features such as tables, code boxes, and full fuzzy search.
 
 # Note
-For the current state of our app, only the windows version is available. However, for our final product, we would like to create a mac version as well.
+For the current state of our app, only the Windows version is available. However, for our final product, we would like to create a Mac version as well.
