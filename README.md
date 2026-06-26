@@ -34,39 +34,63 @@ Ultimately, it delivers the zero-mouse execution speed of an advanced developer 
 5. The UI/UX Enthusiast
 - As a user who values aesthetics, I want a minimalist workspace with clean typography, rounded edges, and translucent sidebars so that the editor feels modern and unobtrusive.
 
-# Feature 1
-The Notepad (18 May - 31 May)
-- Blank page for users to type
-- Has all the standard features with good markup system
-- Able to save notes in `.x2` format and export them as PDF files
+# Features
+## 1. The Notepad (18 May - 31 May)
+This is the foundation of x2pad. It provides users with a clean writing space where they can type notes, format text and build structured documents without needing to switch between keyboard and mouse. 
 
-# Feature 2
-The // Registry (1 Jun - 11 Jun)
-- Type an action without having to click the mouse
-- Change font sizes, text formats, create tables, code boxes, etc.
-- //cmd
+The main editor is built using CodeMirror 6, which provides a flexible text-editing engine. Instead of relying on a standard HTML text area, CodeMirror allows x2pad to track editor state, cursor position, formatting ranges, and command input more precisely.
 
-# Feature 3
-The `\\` Registry (12 Jun - 29 Jun)
-- AI search
-- Generate suggestions or answer questions user has
-- `\\<prompt>`
+## 2. The `//` Registry (1 Jun - 11 Jun)
+This is the main interaction system of x2pad. It allows users to perform actions by typing commands directly into the document instead of clicking toolbar buttons or memorising keyboard shortcuts. THis supports the main goal of x2pad: keeping users in their typing flow.
 
-# Feature 4
-Code Box (1 Jul - 10 Jul)
-- Allow users to type code with standard coding formatting
-- Run C++ and Python code (may extend to more languages if time permits)
+The command registry is stored centrally in `src/CommandRegistry.ts`, making it easier to add, update, or remove commands without scattering command logic throughout the application.
 
-# Feature 5
-Tables (11 Jul - 20 Jul)
-- Enter and Tab to extend rows and columns
-- Table commands such as SUM, AVERAGE, etc.
+### How It Works
+When the user types `//`, the editor detects that a command may be starting and opens a command menu. As the user continues typing, the available commands are filtered based on the input.
 
-# Feature 6
-Fuzzy Search (21 Jul - 27 Jul)
-- Gives suggestions when users type //
-- Displayed in a dropdown menu, with selection controlled using the up and down arrow keys
-- Eliminates need to memorise commands
+Eg. typing `//bo` may suggest `//bold`, while typing `//date` can trigger the insertion of the current date.
+
+## 3. The `\\` Registry (12 Jun - 29 Jun)
+The `\\` registry is designed to provide AI assistance directly inside the editor. Instead of copying text into a seperate chatbot or browser window, users can ask for help while staying inside their notes.
+
+This feature supports use cases such as idea expansion, summarisation, rewritting, explanation and study assistance. The AI workflow is intended to feel like a natural extension of typing, rather than a separate tool.
+
+### How It Works
+When the user types `\\` followed by a prompt, x2pad treats the input as an AI request. The prompt is sent to the Gemini API, and the response can be inserted back into the editor.
+
+Eg. `\\summarise this paragraph`
+Eg. `\\give me 3 essay points about climate change`
+Eg. `\\explain this code in simple terms`
+
+Currently, we require users to input their Gemini API key into the app in order to use this feature. Maybe in the future, we can create a tracking system, allow users to use the AI feature without having their own API key, and then pay at the end of the month. 
+
+## 4. Code Box (1 Jul - 10 Jul)
+The code box allows users to write and run code snippets directly inside their notes. This is especially useful for students, developers, and technical users who want to test ideas without leaving the editor. The goal is to make x2pad useful not only for writing, but also for lightweight experimentation.
+
+### How It Works
+Users will be able to type the command `//code` to insert a code block into the document. Inside the code box, users can write code with proper formatting and then run it from within the app. 
+
+The backend can handle code execution through the Tauri/Rust layer, which is better suited for interacting with the local system than the frontend alone.
+
+The initial plan is to support Python and C++, with the possibility of adding more languages in the future.
+
+## 5. Tables (11 Jul - 20 Jul)
+The table feature is designed to help users structure information quickly without relying on mouse-heavy table editing tools. This is useful for lecture notes, comparison charts, planning, and lightweight calculations. The goal is to make table editing feel natural inside a keyboard-first note-taking environment.
+
+### How It Works
+Users will be able to create tables using `//table`. Once a table is created, keyboard actions such as arrow keys, `Tab` and `Enter` can be used to move between cells, add columns or create new rows.
+
+## 6. Fuzzy Search (21 Jul - 27 Jul)
+This improves the discoverability of commands. Since x2pad depends heavily on typed commands, users should not need to memorise every command exactly. Fuzzy search allows users to type partial or imperfect command names and still find the command they want.
+
+### How It Works
+When the command menu opens, Fuse.js can compare the user's input against the list of available commands. Instead of only matching exact prefixes, it can return close matches.
+
+Eg. typing `//blt` could suggest `//bulletlist`
+Eg. typing `//wrd` could suggest `//wordcount`
+Eg. typing `//hdr` could suggest `//header`
+
+This makes the command system more forgiving and beginner-friendly.
 
 # Tech Stack
 
@@ -102,6 +126,16 @@ Fuzzy Search (21 Jul - 27 Jul)
 ![main editor](project-docs/01_windows_obsidian_main_editor.png)
 ![cmd registry](project-docs/02_windows_obsidian_command_registry.png)
 ![ai assist](project-docs/03_windows_obsidian_ai_inline.png)
+
+# Current Design
+
+## Main Editor Interface
+![main editor](<project-docs/Screenshot 2026-06-26 141027.png>)
+This screenshot shows the current x2pad editor interface, including the writing area, toolbar and overall dark theme.
+
+## Command Registry
+![cmd registry](<project-docs/Screenshot 2026-06-26 141128.png>)
+This screenshot shows the command menu appearing after the user types `//`. The menu helps users discover available commands without memorising shortcuts.
 
 # Command Registry
 <table>
@@ -160,6 +194,108 @@ This gives the app a working persistence layer for the current editor features. 
 
 # Architecture
 ![architecture](project-docs/architecture.jpg)
+x2pad is built as a desktop application using Tauri, React, TypeScript, CodeMirror, and Rust. The application is split into two main layers: the frontend editor layer and the backend desktop layer.
+
+The frontend layer is responsible for the user interface, editor behaviour, command detection, and visual feedback. The backend layer is responsible for desktop-specific operations such as saving files, opening files, exporting documents, and running system-level tasks.
+
+This separation allows x2pad to feel like a modern web-based editor while still having access to native desktop features.
+
+## 1. Frontend Responsibilities
+The frontend is built using React, TypeScript, CodeMirror 6, Fuse.js, and CSS. It is responsible for everything the user directly interacts with inside the editor.
+
+The frontend handles:
+- Rendering the main editor interface
+- Displaying the toolbar, sidebar, command menu, and status bar
+- Managing editor state such as text content, cursor position, and formatting
+- Detecting typed commands such as `//bold`, `//save`, and `\\<prompt>`
+- Filtering command suggestions as the user types
+- Applying visual formatting such as bold, italic, underline, strikethrough, font size, and colour
+- Sending save, export, and AI requests to the backend when needed
+
+CodeMirror 6 is especially important because it gives x2pad more control than a normal text area. It allows the app to track document changes, command triggers, and formatting behaviour in a more structured way.
+
+React is used to organise the interface into reusable components, while TypeScript helps keep the command and editor logic safer as the app becomes more complex.
+
+## 2. Rust/Tauri Backend Responsibilities
+The backend is built using Rust through the Tauri framework. It acts as the bridge between the frontend editor and the user's operating system.
+
+The backend handles:
+- Saving notes as `.x2` files
+- Opening existing `.x2` files
+- Exporting notes to other formats such as PDF
+- Accessing the local file system
+- Running local processes for future code execution features
+- Handling backend operations that should not be done directly in the frontend
+
+Tauri allows the app to use the operating system's native webview instead of bundling a full browser engine. This helps keep the application smaller and faster than many Electron-based desktop apps.
+
+Rust is used because it is fast, memory-safe, and suitable for low-level desktop operations such as file handling and process execution.
+
+## 3. How Commands Flow Through the App
+The command system is one of the most important parts of x2pad. It allows users to control the editor by typing commands directly into the document.
+
+A typical `//` command flow works like this:
+1. The user types `//` in the editor.
+2. The frontend detects that the user may be entering a command.
+3. The command menu appears and displays matching commands.
+4. As the user continues typing, the command list is filtered.
+5. The user selects or completes a command such as `//bold`.
+6. The editor checks the command against the central command registry.
+7. The command is executed.
+8. The command text is removed from the document.
+9. The editor updates the document state or formatting.
+
+For example, when the user types `//bold`, x2pad recognises the command, removes `//bold` from the editor, and enables bold formatting for the next text the user types.
+
+This design keeps the user in the typing flow because they do not need to stop and search through menus or memorise complex keyboard shortcuts.
+
+## 4. How Saving and Loading Works
+x2pad uses a local-first saving system based on the `.x2` file format. This allows users to store their notes directly on their own device.
+
+The save flow works like this:
+1. The user types `//save`.
+2. The frontend recognises the save command.
+3. The editor collects the note title, text content, and formatting ranges.
+4. The frontend sends this data to the Rust/Tauri backend.
+5. The backend converts the note into the `.x2` JSON structure.
+6. The backend writes the `.x2` file to the user's local file system.
+7. The editor can show feedback that the note has been saved.
+
+The loading flow works like this:
+1. The user opens an existing `.x2` file.
+2. The Rust/Tauri backend reads the file from the local file system.
+3. The backend validates that the file is a supported x2pad note.
+4. The note content and style ranges are sent back to the frontend.
+5. The frontend reloads the text into CodeMirror.
+6. The saved formatting is reapplied inside the editor.
+
+This system allows x2pad to preserve both the user's writing and the formatting applied through typed commands.
+
+## 5. How AI Requests Are Handled
+The `\\` AI registry is designed to let users request AI assistance without leaving the editor. Unlike a simple chatbot prompt, x2pad can send the user's prompt together with document context so that the AI response is aware of what the user is currently working on.
+
+A typical AI request flow works like this:
+1. The user types a prompt using the `\\` command.
+2. The frontend detects that the input is an AI request.
+3. The prompt text is extracted from the editor.
+4. The frontend collects additional context from the note, such as the active line, nearby paragraph, document headings, and full document text.
+5. The app sends the prompt and document context to the AI service.
+6. The AI service returns a response that is more relevant to the current note.
+7. The response is prepared for insertion back into the editor.
+8. The user can accept the response and continue writing without switching applications.
+
+Eg. a user may type: `\\summarise this paragraph`
+
+x2pad can send the prompt together with the current note context to the Gemini API, allowing the generated response to better match the user's existing document.
+
+In future versions, the AI flow can be improved with loading states, streamed responses, error handling, and options for where the AI response should be inserted. For privacy, the app should also make it clear when text or document context is being sent to an external AI service.
+
+## 6. Why This Architecture Fits x2pad
+This architecture fits x2pad because the app needs both a flexible editor interface and native desktop capabilities.
+
+The frontend is responsible for delivering a smooth writing experience, while the Rust/Tauri backend handles operations that require access to the local system. This separation keeps the editor responsive while still allowing features such as local file saving, exporting, and future code execution.
+
+By combining React, CodeMirror, Tauri, and Rust, x2pad can provide the feel of a modern web editor while behaving like a lightweight desktop application.
 
 # Current Milestone Objectives
 For the current milestone, our main objective is to complete the core `//` command registry and begin building the `\\` AI registry
