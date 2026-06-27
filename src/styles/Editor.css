@@ -225,6 +225,13 @@ input {
   background-clip: content-box;
 }
 
+.notes-empty {
+  padding: 18px 12px;
+  color: #81798f;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .note-link {
   position: relative;
   display: grid;

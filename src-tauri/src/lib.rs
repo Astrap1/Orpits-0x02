@@ -18,6 +18,8 @@ const PDF_BODY_LINE_HEIGHT_MM: f32 = 6.0;
 const PDF_BODY_MAX_WIDTH_MM: f32 = PDF_PAGE_WIDTH_MM - (PDF_MARGIN_MM * 2.0);
 const PDF_DEFAULT_TEXT_COLOR: &str = "White";
 const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
+const NOTE_FOLDER_SETTINGS_FILE: &str = "note-folder-settings.json";
+const DEFAULT_NOTE_FOLDER_PATH: &str = r"C:\Users\zj040\Projects\Orbital";
 
 #[derive(Deserialize)]
 struct NotePayload {
@@ -31,6 +33,12 @@ struct NotePayload {
 struct GeminiSettings {
     #[serde(rename = "apiKey")]
     api_key: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct NoteFolderSettings {
+    #[serde(rename = "folderPath")]
+    folder_path: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -102,6 +110,13 @@ struct LoadedX2Note {
     path: String,
 }
 
+#[derive(Serialize)]
+struct LoadedX2Folder {
+    notes: Vec<LoadedX2Note>,
+    #[serde(rename = "activePath")]
+    active_path: String,
+}
+
 #[derive(Clone)]
 struct StyledTextSegment {
     text: String,
@@ -116,7 +131,7 @@ struct PdfFonts {
 }
 
 #[tauri::command]
-fn save_x2_note(path: String, note: NotePayload) -> Result<(), String> {
+fn save_x2_note(app: AppHandle, path: String, note: NotePayload) -> Result<(), String> {
     let saved_at = current_timestamp();
     let file = X2NoteFile {
         format: X2_FORMAT,
@@ -130,12 +145,22 @@ fn save_x2_note(path: String, note: NotePayload) -> Result<(), String> {
     let serialized = serde_json::to_string_pretty(&file)
         .map_err(|error| format!("Could not prepare .x2 file: {error}"))?;
 
-    std::fs::write(path, serialized).map_err(|error| format!("Could not save .x2 file: {error}"))
+    std::fs::write(&path, serialized)
+        .map_err(|error| format!("Could not save .x2 file: {error}"))?;
+    remember_note_folder(&app, Path::new(&path))?;
+    Ok(())
 }
 
 #[tauri::command]
 fn load_x2_note(path: String) -> Result<LoadedX2Note, String> {
     load_x2_note_from_path(Path::new(&path))
+}
+
+#[tauri::command]
+fn load_x2_folder(app: AppHandle, path: String) -> Result<LoadedX2Folder, String> {
+    let folder = load_x2_folder_from_path(Path::new(&path))?;
+    remember_note_folder(&app, Path::new(&path))?;
+    Ok(folder)
 }
 
 #[tauri::command]
@@ -145,6 +170,25 @@ fn load_startup_x2_note() -> Result<Option<LoadedX2Note>, String> {
     };
 
     load_x2_note(path).map(Some)
+}
+
+#[tauri::command]
+fn load_startup_x2_folder(app: AppHandle) -> Result<Option<LoadedX2Folder>, String> {
+    if let Some(path) = find_x2_path(std::env::args().skip(1)) {
+        return load_x2_folder(app, path).map(Some);
+    }
+
+    let directory = get_default_note_folder_path(&app)?;
+    let Some(path) = find_first_x2_path(&directory)? else {
+        return Ok(None);
+    };
+
+    load_x2_folder(app, path.to_string_lossy().to_string()).map(Some)
+}
+
+#[tauri::command]
+fn get_default_note_folder(app: AppHandle) -> Result<String, String> {
+    get_default_note_folder_path(&app).map(|path| path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -283,6 +327,156 @@ fn gemini_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Could not create the app config directory: {error}"))?;
 
     Ok(directory.join(GEMINI_SETTINGS_FILE))
+}
+
+fn note_folder_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Could not find the app config directory: {error}"))?;
+
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create the app config directory: {error}"))?;
+
+    Ok(directory.join(NOTE_FOLDER_SETTINGS_FILE))
+}
+
+fn get_default_note_folder_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let settings_path = note_folder_settings_path(app)?;
+
+    if settings_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&settings_path) {
+            if let Ok(settings) = serde_json::from_str::<NoteFolderSettings>(&content) {
+                let configured_path = PathBuf::from(settings.folder_path);
+                let legacy_default_path = app
+                    .path()
+                    .document_dir()
+                    .ok()
+                    .map(|documents| documents.join("x2pad Notes"));
+                let is_legacy_default = legacy_default_path
+                    .as_ref()
+                    .is_some_and(|legacy_path| paths_match(&configured_path, legacy_path));
+
+                if configured_path.is_dir() && !is_legacy_default {
+                    return Ok(configured_path);
+                }
+            }
+        }
+    }
+
+    let default_directory = PathBuf::from(DEFAULT_NOTE_FOLDER_PATH);
+    std::fs::create_dir_all(&default_directory)
+        .map_err(|error| format!("Could not create the default note folder: {error}"))?;
+    remember_note_directory(app, &default_directory)?;
+    Ok(default_directory)
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+fn remember_note_folder(app: &AppHandle, note_path: &Path) -> Result<(), String> {
+    let directory = if note_path.is_dir() {
+        note_path
+    } else {
+        note_path
+            .parent()
+            .ok_or_else(|| "Could not determine the note folder.".to_string())?
+    };
+
+    remember_note_directory(app, directory)
+}
+
+fn remember_note_directory(app: &AppHandle, directory: &Path) -> Result<(), String> {
+    let resolved_directory = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    let settings = NoteFolderSettings {
+        folder_path: resolved_directory.to_string_lossy().to_string(),
+    };
+    let serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|error| format!("Could not prepare note folder settings: {error}"))?;
+    let settings_path = note_folder_settings_path(app)?;
+
+    std::fs::write(settings_path, serialized)
+        .map_err(|error| format!("Could not save note folder settings: {error}"))
+}
+
+fn find_first_x2_path(directory: &Path) -> Result<Option<PathBuf>, String> {
+    let mut paths = std::fs::read_dir(directory)
+        .map_err(|error| format!("Could not read the note folder: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| is_x2_path(path.to_string_lossy().as_ref()))
+        .collect::<Vec<_>>();
+
+    paths.sort_by(|left, right| {
+        left.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_lowercase()
+            .cmp(
+                &right
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_lowercase(),
+            )
+    });
+
+    Ok(paths.into_iter().next())
+}
+
+fn load_x2_folder_from_path(path: &Path) -> Result<LoadedX2Folder, String> {
+    if !is_x2_path(path.to_string_lossy().as_ref()) {
+        return Err("Only .x2 note files can be opened.".to_string());
+    }
+
+    let active_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let directory = active_path
+        .parent()
+        .ok_or_else(|| "Could not determine the note folder.".to_string())?;
+    let mut note_paths = std::fs::read_dir(directory)
+        .map_err(|error| format!("Could not read the note folder: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry_path| is_x2_path(entry_path.to_string_lossy().as_ref()))
+        .collect::<Vec<_>>();
+
+    note_paths.sort_by(|left, right| {
+        left.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_lowercase()
+            .cmp(
+                &right
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_lowercase(),
+            )
+    });
+
+    let mut notes = Vec::new();
+
+    for note_path in note_paths {
+        if let Ok(note) = load_x2_note_from_path(&note_path) {
+            notes.push(note);
+        }
+    }
+
+    if notes.is_empty() {
+        return Err("No valid .x2 notes were found in this folder.".to_string());
+    }
+
+    Ok(LoadedX2Folder {
+        notes,
+        active_path: active_path.to_string_lossy().to_string(),
+    })
 }
 
 fn load_x2_note_from_path(path: &Path) -> Result<LoadedX2Note, String> {
@@ -631,7 +825,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_x2_note,
             load_x2_note,
+            load_x2_folder,
             load_startup_x2_note,
+            load_startup_x2_folder,
+            get_default_note_folder,
             export_note_pdf,
             has_gemini_api_key,
             get_gemini_api_key,

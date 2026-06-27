@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import type { FormEvent, KeyboardEvent, MutableRefObject } from "react";
-import { useNavigate, useParams } from "react-router-dom";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import { Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
@@ -59,22 +58,7 @@ interface AiModelResponse {
   placement?: AiModelPlacement;
 }
 
-const notes = [
-  {
-    id: "sample-note",
-    title: "Sample Note",
-    updatedAt: "Today",
-    content:
-      "Welcome to x2pad.\n\nType //title, //header, //body, //bold, //italic, //size 12, //bulletlist, //numberlist, //date, //time, //wordcount, or //color red and press Enter to change the writing style.\n\n// color red\nThis line is a custom registry command, so it gets its own visual language."
-  },
-  {
-    id: "second-sample-note",
-    title: "Second Sample Note",
-    updatedAt: "Just now",
-    content:
-      "This is a second sample note.\n\nUse it to test switching between notes from the Vault sidebar while keeping the editor aligned like a normal writing surface."
-  }
-];
+const EMPTY_NOTE_TITLE = "Untitled Note";
 
 const colorValues = TEXT_COLOR_OPTIONS.reduce<Record<string, string>>((values, color) => {
   values[color.label] = color.value;
@@ -102,6 +86,11 @@ interface LoadedX2Note {
   savedAt: string;
   path: string;
   styles?: TextStyleRange[];
+}
+
+interface LoadedX2Folder {
+  notes: LoadedX2Note[];
+  activePath: string;
 }
 
 interface PendingStyleRestore {
@@ -663,6 +652,19 @@ function ensurePathExtension(path: string, extension: "x2" | "pdf") {
   return path.toLowerCase().endsWith(`.${extension}`) ? path : `${path}.${extension}`;
 }
 
+function getPathKey(path: string) {
+  return path.replace(/\\/g, "/").toLowerCase();
+}
+
+function getSavedNoteMeta(savedAt: string) {
+  const savedDate = new Date(savedAt);
+  return Number.isNaN(savedDate.getTime()) ? "Saved note" : savedDate.toLocaleDateString();
+}
+
+function joinFolderPath(folder: string, fileName: string) {
+  return `${folder.replace(/[\\/]+$/, "")}/${fileName}`;
+}
+
 function getCommandMenuPosition(
   coords: { top: number; bottom: number; left: number },
   commandCount: number
@@ -810,9 +812,6 @@ function WindowControls() {
 }
 
 function Editor() {
-  const navigate = useNavigate();
-  const { noteId } = useParams();
-  const initialNote = notes.find((note) => note.id === noteId) ?? notes[0];
   const sidebarRef = useRef<HTMLElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
@@ -821,10 +820,10 @@ function Editor() {
   const forcedStyleRangesRef = useRef<TextStyleRange[] | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [activeNoteId, setActiveNoteId] = useState(initialNote.id);
   const [openedNoteTitle, setOpenedNoteTitle] = useState<string | null>(null);
   const [openedNotePath, setOpenedNotePath] = useState<string | null>(null);
-  const [value, setValue] = useState(initialNote.content);
+  const [openedNotes, setOpenedNotes] = useState<LoadedX2Note[]>([]);
+  const [value, setValue] = useState("");
   const [searchValue, setSearchValue] = useState("");
   const [sidebarSelection, setSidebarSelection] = useState(1);
   const [showLogoPane, setShowLogoPane] = useState(false);
@@ -853,12 +852,11 @@ function Editor() {
 
   const filteredNotes = useMemo(() => {
     const query = searchValue.trim().toLowerCase();
-    if (!query) return notes;
-    return notes.filter((note) => note.title.toLowerCase().includes(query));
-  }, [searchValue]);
+    if (!query) return openedNotes;
+    return openedNotes.filter((note) => note.title.toLowerCase().includes(query));
+  }, [openedNotes, searchValue]);
 
-  const activeNote = notes.find((note) => note.id === activeNoteId) ?? notes[0];
-  const activeNoteTitle = openedNoteTitle ?? activeNote.title;
+  const activeNoteTitle = openedNoteTitle ?? EMPTY_NOTE_TITLE;
   const visibleCommands = useMemo(() => {
     const query = commandQuery.trim().toLowerCase();
 
@@ -887,7 +885,8 @@ function Editor() {
   }, []);
 
   const focusSidebarOnActiveNote = useCallback(() => {
-    const activeNoteIndex = filteredNotes.findIndex((note) => note.id === activeNoteId);
+    const activePathKey = getPathKey(openedNotePath ?? "");
+    const activeNoteIndex = filteredNotes.findIndex((note) => getPathKey(note.path) === activePathKey);
 
     if (activeNoteIndex >= 0) {
       setSidebarSelection(activeNoteIndex + 1);
@@ -900,7 +899,7 @@ function Editor() {
     requestAnimationFrame(() => {
       sidebarRef.current?.focus();
     });
-  }, [activeNoteId, filteredNotes]);
+  }, [filteredNotes, openedNotePath]);
 
   const openLoadedX2Note = useCallback((note: LoadedX2Note) => {
     pendingStyleRestoreRef.current = {
@@ -917,31 +916,63 @@ function Editor() {
     setFileStatusKind("success");
   }, []);
 
-  const setActiveNote = useCallback((noteIdToActivate: string, shouldNavigate = false) => {
-    const nextNote = notes.find((note) => note.id === noteIdToActivate);
-    if (!nextNote) return;
-
-    setActiveNoteId(nextNote.id);
-    setOpenedNoteTitle(null);
-    setOpenedNotePath(null);
-    pendingStyleRestoreRef.current = null;
-    styleRangesRef.current = [];
-    setValue(nextNote.content);
-    setShowLogoPane(false);
-    setShowCommands(false);
-    setCommandQuery("");
-
-    requestAnimationFrame(() => {
-      editorViewRef.current?.dispatch({
-        selection: { anchor: 0 },
-        effects: replaceTextStyleDecorations.of([])
-      });
-    });
-
-    if (shouldNavigate) {
-      navigate(`/editor/${nextNote.id}`);
+  const cacheCurrentOpenedNote = useCallback(() => {
+    if (!openedNotePath) {
+      return;
     }
-  }, [navigate]);
+
+    const activePathKey = getPathKey(openedNotePath);
+    const currentStyles = styleRangesRef.current.map((range) => ({
+      ...range,
+      style: { ...range.style }
+    }));
+
+    setOpenedNotes((currentNotes) => currentNotes.map((note) => (
+      getPathKey(note.path) === activePathKey
+        ? {
+            ...note,
+            title: openedNoteTitle || note.title,
+            content: value,
+            styles: currentStyles
+          }
+        : note
+    )));
+  }, [openedNotePath, openedNoteTitle, value]);
+
+  const activateOpenedNote = useCallback((path: string) => {
+    const targetPathKey = getPathKey(path);
+    const targetNote = openedNotes.find((note) => getPathKey(note.path) === targetPathKey);
+
+    if (!targetNote) {
+      return;
+    }
+
+    if (getPathKey(openedNotePath ?? "") === targetPathKey) {
+      setShowLogoPane(false);
+      setShowCommands(false);
+      setCommandQuery("");
+      return;
+    }
+
+    cacheCurrentOpenedNote();
+    openLoadedX2Note(targetNote);
+  }, [cacheCurrentOpenedNote, openLoadedX2Note, openedNotePath, openedNotes]);
+
+  const openLoadedX2Folder = useCallback((folder: LoadedX2Folder) => {
+    const activePathKey = getPathKey(folder.activePath);
+    const activeNote = folder.notes.find((note) => getPathKey(note.path) === activePathKey)
+      ?? folder.notes[0];
+
+    if (!activeNote) {
+      setFileStatus("No valid .x2 notes were found in this folder.");
+      setFileStatusKind("error");
+      return;
+    }
+
+    setOpenedNotes(folder.notes);
+    openLoadedX2Note(activeNote);
+    setFileStatus(`Opened ${folder.notes.length} note${folder.notes.length === 1 ? "" : "s"} from folder.`);
+  }, [openLoadedX2Note]);
 
   const showSearchPane = useCallback(() => {
     setSidebarSelection(0);
@@ -1012,10 +1043,12 @@ function Editor() {
     const isOpenCommand = commandName === "open";
     const extension = isSaveCommand ? "x2" : "pdf";
     let outputPath = currentPath && isSaveCommand ? currentPath : null;
+    const defaultNoteFolder = await invoke<string>("get_default_note_folder").catch(() => "");
 
     if (isOpenCommand) {
       const selectedPath = await open({
         multiple: false,
+        defaultPath: defaultNoteFolder || undefined,
         filters: [
           {
             name: "x2 note",
@@ -1033,8 +1066,8 @@ function Editor() {
       try {
         setFileStatus("Opening .x2 file...");
         setFileStatusKind("idle");
-        const note = await invoke<LoadedX2Note>("load_x2_note", { path: selectedPath });
-        openLoadedX2Note(note);
+        const folder = await invoke<LoadedX2Folder>("load_x2_folder", { path: selectedPath });
+        openLoadedX2Folder(folder);
       } catch (error) {
         setFileStatus(String(error));
         setFileStatusKind("error");
@@ -1045,7 +1078,9 @@ function Editor() {
 
     if (!outputPath) {
       const selectedPath = await save({
-        defaultPath: getSafeFileName(title, extension),
+        defaultPath: defaultNoteFolder
+          ? joinFolderPath(defaultNoteFolder, getSafeFileName(title, extension))
+          : getSafeFileName(title, extension),
         filters: [
           {
             name: isSaveCommand ? "x2 note" : "PDF document",
@@ -1075,7 +1110,30 @@ function Editor() {
 
       if (isSaveCommand) {
         await invoke("save_x2_note", { path: outputPath, note });
-        setOpenedNoteTitle(title || "Untitled Note");
+        const savedTitle = title || "Untitled Note";
+        const savedPathKey = getPathKey(outputPath);
+        const savedNote: LoadedX2Note = {
+          title: savedTitle,
+          content: documentText,
+          savedAt: new Date().toISOString(),
+          path: outputPath,
+          styles
+        };
+
+        setOpenedNotes((currentNotes) => {
+          const existingIndex = currentNotes.findIndex((currentNote) => (
+            getPathKey(currentNote.path) === savedPathKey
+          ));
+
+          if (existingIndex < 0) {
+            return [...currentNotes, savedNote];
+          }
+
+          return currentNotes.map((currentNote, index) => (
+            index === existingIndex ? savedNote : currentNote
+          ));
+        });
+        setOpenedNoteTitle(savedTitle);
         setOpenedNotePath(outputPath);
         setFileStatus(`Saved .x2 file (${styles.length} style ${styles.length === 1 ? "range" : "ranges"}).`);
       } else {
@@ -1088,7 +1146,7 @@ function Editor() {
       setFileStatus(String(error));
       setFileStatusKind("error");
     }
-  }, [openLoadedX2Note]);
+  }, [openLoadedX2Folder]);
 
   const runAiCommandAtCursor = useCallback((view: EditorView) => {
     const pendingAiCommand = getAiCommandAtCursor(view);
@@ -1508,7 +1566,7 @@ function Editor() {
 
       const selectedNote = filteredNotes[sidebarSelection - 1];
       if (selectedNote) {
-        setActiveNote(selectedNote.id, true);
+        activateOpenedNote(selectedNote.path);
         focusEditorAtStart();
       }
       return;
@@ -1536,16 +1594,17 @@ function Editor() {
 
     const selectedNote = filteredNotes[nextSelection - 1];
     if (selectedNote) {
-      setActiveNote(selectedNote.id);
+      activateOpenedNote(selectedNote.path);
     }
   };
 
   useEffect(() => {
-    const noteIndex = filteredNotes.findIndex((note) => note.id === activeNoteId);
+    const activePathKey = getPathKey(openedNotePath ?? "");
+    const noteIndex = filteredNotes.findIndex((note) => getPathKey(note.path) === activePathKey);
     if (noteIndex >= 0 && !showLogoPane) {
       setSidebarSelection(noteIndex + 1);
     }
-  }, [activeNoteId, filteredNotes, showLogoPane]);
+  }, [filteredNotes, openedNotePath, showLogoPane]);
 
   useEffect(() => {
     sidebarRef.current?.focus();
@@ -1588,19 +1647,19 @@ function Editor() {
       return;
     }
 
-    void invoke<LoadedX2Note | null>("load_startup_x2_note")
-      .then((note) => {
-        if (!note) {
+    void invoke<LoadedX2Folder | null>("load_startup_x2_folder")
+      .then((folder) => {
+        if (!folder) {
           return;
         }
 
-        openLoadedX2Note(note);
+        openLoadedX2Folder(folder);
       })
       .catch((error) => {
         setFileStatus(String(error));
         setFileStatusKind("error");
       });
-  }, [openLoadedX2Note]);
+  }, [openLoadedX2Folder]);
 
   useEffect(() => {
     if (!pendingStyleRestoreRef.current || !editorViewRef.current) {
@@ -1708,28 +1767,35 @@ function Editor() {
           </label>
 
           <nav className="notes-nav" aria-label="Notes">
+            {filteredNotes.length === 0 && (
+              <div className="notes-empty">
+                {openedNotes.length === 0 ? "Open an .x2 file to load its folder." : "No matching notes."}
+              </div>
+            )}
+
             {filteredNotes.map((note, index) => {
               const selectionIndex = index + 1;
               const isSelected = sidebarSelection === selectionIndex;
-              const isActive = activeNoteId === note.id && !showLogoPane;
+              const isActive = getPathKey(openedNotePath ?? "") === getPathKey(note.path) && !showLogoPane;
 
               return (
                 <button
                   type="button"
                   className={`note-link ${isSelected || isActive ? "active" : ""}`}
-                  key={note.id}
+                  key={note.path}
+                  title={note.path}
                   onMouseEnter={() => {
                     setSidebarSelection(selectionIndex);
-                    setActiveNote(note.id);
+                    activateOpenedNote(note.path);
                   }}
                   onFocus={() => {
                     setSidebarSelection(selectionIndex);
-                    setActiveNote(note.id);
+                    activateOpenedNote(note.path);
                   }}
-                  onClick={() => setActiveNote(note.id, true)}
+                  onClick={() => activateOpenedNote(note.path)}
                 >
-                  <span className="note-link-title">{note.title}</span>
-                  <span className="note-link-meta">{note.updatedAt}</span>
+                  <span className="note-link-title">{note.title || EMPTY_NOTE_TITLE}</span>
+                  <span className="note-link-meta">{getSavedNoteMeta(note.savedAt)}</span>
                 </button>
               );
             })}
@@ -1743,7 +1809,7 @@ function Editor() {
 
         <main className="editor-main">
           <div className="note-status-bar">
-            <a className="note-title-anchor" href={`#/editor/${activeNote.id}`} tabIndex={-1}>
+            <a className="note-title-anchor" href="#" tabIndex={-1}>
               {showLogoPane ? "Search" : activeNoteTitle}
             </a>
             <div className="style-status">
