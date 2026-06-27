@@ -220,6 +220,11 @@ export const CommandRegistry: Command[] = [
     action: notImplemented
   },
   {
+    name: "new",
+    description: "Create a new .x2 note",
+    action: notImplemented
+  },
+  {
     name: "open",
     description: "Open .x2 note",
     action: notImplemented

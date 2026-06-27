@@ -665,6 +665,11 @@ function joinFolderPath(folder: string, fileName: string) {
   return `${folder.replace(/[\\/]+$/, "")}/${fileName}`;
 }
 
+function getNoteTitleFromPath(path: string) {
+  const fileName = path.split(/[\\/]/).pop() ?? "";
+  return fileName.replace(/\.x2$/i, "").trim() || EMPTY_NOTE_TITLE;
+}
+
 function getCommandMenuPosition(
   coords: { top: number; bottom: number; left: number },
   commandCount: number
@@ -1025,7 +1030,7 @@ function Editor() {
   }, []);
 
   const runFileCommand = useCallback(async (
-    commandName: "save" | "open" | "export",
+    commandName: "save" | "new" | "open" | "export",
     documentText: string,
     title: string,
     currentPath: string | null,
@@ -1034,12 +1039,13 @@ function Editor() {
     const isTauri = "__TAURI_INTERNALS__" in window;
 
     if (!isTauri) {
-      setFileStatus("Open, save, and export require the desktop app.");
+      setFileStatus("New, open, save, and export require the desktop app.");
       setFileStatusKind("error");
       return;
     }
 
     const isSaveCommand = commandName === "save";
+    const isNewCommand = commandName === "new";
     const isOpenCommand = commandName === "open";
     const extension = isSaveCommand ? "x2" : "pdf";
     let outputPath = currentPath && isSaveCommand ? currentPath : null;
@@ -1068,6 +1074,48 @@ function Editor() {
         setFileStatusKind("idle");
         const folder = await invoke<LoadedX2Folder>("load_x2_folder", { path: selectedPath });
         openLoadedX2Folder(folder);
+      } catch (error) {
+        setFileStatus(String(error));
+        setFileStatusKind("error");
+      }
+
+      return;
+    }
+
+    if (isNewCommand) {
+      const selectedPath = await save({
+        defaultPath: defaultNoteFolder
+          ? joinFolderPath(defaultNoteFolder, "Untitled Note.x2")
+          : "Untitled Note.x2",
+        filters: [
+          {
+            name: "x2 note",
+            extensions: ["x2"]
+          }
+        ]
+      });
+
+      if (!selectedPath) {
+        setFileStatus("New note cancelled.");
+        setFileStatusKind("idle");
+        return;
+      }
+
+      const newNotePath = ensurePathExtension(selectedPath, "x2");
+      const newNote = {
+        title: getNoteTitleFromPath(newNotePath),
+        content: "",
+        styles: []
+      };
+
+      try {
+        setFileStatus("Creating note...");
+        setFileStatusKind("idle");
+        await invoke("save_x2_note", { path: newNotePath, note: newNote });
+        const folder = await invoke<LoadedX2Folder>("load_x2_folder", { path: newNotePath });
+        openLoadedX2Folder(folder);
+        setFileStatus("Created new .x2 note.");
+        setFileStatusKind("success");
       } catch (error) {
         setFileStatus(String(error));
         setFileStatusKind("error");
@@ -1335,7 +1383,7 @@ function Editor() {
       pendingCommand.to
     );
 
-    if (commandName === "save" || commandName === "open" || commandName === "export") {
+    if (commandName === "save" || commandName === "new" || commandName === "open" || commandName === "export") {
       view.dispatch({
         changes: {
           from: pendingCommand.from,
