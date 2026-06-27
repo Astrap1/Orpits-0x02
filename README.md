@@ -137,6 +137,14 @@ This screenshot shows the current x2pad editor interface, including the writing 
 ![cmd registry](<project-docs/Screenshot 2026-06-26 141128.png>)
 This screenshot shows the command menu appearing after the user types `//`. The menu helps users discover available commands without memorising shortcuts.
 
+## AI Registry
+![prompt](<project-docs/Screenshot 2026-06-27 141616.png>)
+This screenshot shows the user typing an AI prompt with the `\\` command. The prompt is highlighted in green to distinguish it from normal note content.
+![thinking](<project-docs/Screenshot 2026-06-27 141636.png>)
+This screenshot shows the AI status panel while x2pad is reading the note context and generating a response.
+![ai ready](<project-docs/Screenshot 2026-06-27 141648.png>)
+This screenshot shows the AI response ready state. The user can press `Tab` to switch between insertion positions, `Enter` to insert the response, or `Esc` to cancel.
+
 # Command Registry
 <table>
     <tr>

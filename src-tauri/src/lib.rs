@@ -234,6 +234,27 @@ fn has_gemini_api_key(app: AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn get_gemini_api_key(app: AppHandle) -> Result<Option<String>, String> {
+    let path = gemini_settings_path(&app)?;
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| format!("Could not read Gemini settings: {error}"))?;
+    let settings: GeminiSettings = serde_json::from_str(&content)
+        .map_err(|error| format!("Could not parse Gemini settings: {error}"))?;
+    let api_key = settings.api_key.trim();
+
+    if api_key.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(api_key.to_string()))
+}
+
+#[tauri::command]
 fn save_gemini_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
     let api_key = api_key.trim();
 
@@ -613,6 +634,7 @@ pub fn run() {
             load_startup_x2_note,
             export_note_pdf,
             has_gemini_api_key,
+            get_gemini_api_key,
             save_gemini_api_key
         ])
         .run(tauri::generate_context!())

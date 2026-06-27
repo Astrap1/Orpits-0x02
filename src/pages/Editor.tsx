@@ -19,6 +19,45 @@ const COMMAND_MENU_ITEM_HEIGHT = 41;
 const COMMANDS_WITH_ARGUMENTS = new Set(["color", "size"]);
 const BULLET_LIST_MARKER = "\u2022 ";
 const BROWSER_GEMINI_API_KEY_STORAGE_KEY = "x2pad.geminiApiKey";
+const GEMINI_MODEL = "gemini-3.5-flash";
+
+type AiSessionStatus = "thinking" | "ready" | "error";
+
+type AiPlacementMode =
+  | "command-location"
+  | "current-cursor"
+  | "below-current-line"
+  | "after-nearest-heading"
+  | "end-of-document";
+
+interface AiPlacement {
+  mode: AiPlacementMode;
+  label: string;
+  heading?: string;
+}
+
+interface AiSession {
+  id: string;
+  status: AiSessionStatus;
+  prompt: string;
+  anchor: number;
+  activeLineTo: number;
+  answer: string;
+  placements: AiPlacement[];
+  placementIndex: number;
+  error?: string;
+  isMock?: boolean;
+}
+
+interface AiModelPlacement {
+  mode?: AiPlacementMode;
+  heading?: string;
+}
+
+interface AiModelResponse {
+  answer: string;
+  placement?: AiModelPlacement;
+}
 
 const notes = [
   {
@@ -264,12 +303,17 @@ function applyPendingStyleRestore(
 function buildCommandLineDecorations(doc: Text) {
   const builder = new RangeSetBuilder<Decoration>();
   const commandTokenPattern = /(\/\/[a-z]*)(?:\s+([^/\s]+))?/gi;
+  const aiCommandPattern = /\\\\.+/g;
 
   for (let index = 1; index <= doc.lines; index += 1) {
     const line = doc.line(index);
 
     if (line.text.trimStart().startsWith("//")) {
       builder.add(line.from, line.from, Decoration.line({ class: "cm-command-line" }));
+    }
+
+    if (line.text.trimStart().startsWith("\\\\")) {
+      builder.add(line.from, line.from, Decoration.line({ class: "cm-ai-command-line" }));
     }
 
     for (const match of line.text.matchAll(commandTokenPattern)) {
@@ -283,6 +327,13 @@ function buildCommandLineDecorations(doc: Text) {
       }
 
       builder.add(commandFrom, commandTo, Decoration.mark({ class: "cm-command-command" }));
+    }
+
+    for (const match of line.text.matchAll(aiCommandPattern)) {
+      const commandFrom = line.from + (match.index ?? 0);
+      const commandTo = commandFrom + match[0].length;
+
+      builder.add(commandFrom, commandTo, Decoration.mark({ class: "cm-ai-command" }));
     }
   }
 
@@ -330,6 +381,36 @@ function getCommandAtCursor(view: EditorView) {
   };
 }
 
+function getAiCommandAtCursor(view: EditorView) {
+  const selection = view.state.selection.main;
+
+  if (!selection.empty) {
+    return null;
+  }
+
+  const line = view.state.doc.lineAt(selection.head);
+  const cursorOffset = selection.head - line.from;
+  const textBeforeCursor = line.text.slice(0, cursorOffset);
+  const match = textBeforeCursor.match(/\\\\(.+?)\s*$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const prompt = match[1].trim();
+
+  if (!prompt) {
+    return null;
+  }
+
+  return {
+    prompt,
+    from: line.from + (match.index ?? 0),
+    to: selection.head,
+    lineTo: line.to
+  };
+}
+
 function getSafeFileName(title: string, extension: "x2" | "pdf") {
   const baseName = title
     .trim()
@@ -339,6 +420,243 @@ function getSafeFileName(title: string, extension: "x2" | "pdf") {
     .trim() || "Untitled Note";
 
   return `${baseName}.${extension}`;
+}
+
+function getMarkdownHeadings(documentText: string) {
+  const headings: { title: string; from: number; to: number; level: number }[] = [];
+  let offset = 0;
+
+  for (const line of documentText.split("\n")) {
+    const match = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+
+    if (match) {
+      headings.push({
+        title: match[2],
+        from: offset,
+        to: offset + line.length,
+        level: match[1].length
+      });
+    }
+
+    offset += line.length + 1;
+  }
+
+  return headings;
+}
+
+function getNearestPreviousHeading(documentText: string, anchor: number) {
+  const previousHeadings = getMarkdownHeadings(documentText)
+    .filter((heading) => heading.from <= anchor);
+
+  return previousHeadings[previousHeadings.length - 1];
+}
+
+function getAiPlacementLabel(placement: AiPlacement) {
+  if (placement.heading) {
+    return `${placement.label} "${placement.heading}"`;
+  }
+
+  return placement.label;
+}
+
+function getPlacementFromModelSuggestion(
+  suggestion: AiModelPlacement | undefined,
+  documentText: string,
+  anchor: number
+): AiPlacement | null {
+  if (!suggestion?.mode) {
+    return null;
+  }
+
+  if (suggestion.mode === "after-nearest-heading") {
+    const heading = suggestion.heading
+      ? getMarkdownHeadings(documentText).find((candidate) => (
+        candidate.title.toLowerCase() === suggestion.heading?.toLowerCase()
+      ))
+      : getNearestPreviousHeading(documentText, anchor);
+
+    return {
+      mode: "after-nearest-heading",
+      label: "insert after section",
+      heading: heading?.title
+    };
+  }
+
+  const labels: Record<Exclude<AiPlacementMode, "after-nearest-heading">, string> = {
+    "command-location": "insert where command was typed",
+    "current-cursor": "insert at cursor",
+    "below-current-line": "insert below current line",
+    "end-of-document": "append to note"
+  };
+
+  return {
+    mode: suggestion.mode,
+    label: labels[suggestion.mode]
+  };
+}
+
+function getAiPlacements(documentText: string, anchor: number, modelPlacement?: AiModelPlacement) {
+  const nearestHeading = getNearestPreviousHeading(documentText, anchor);
+  const placements: AiPlacement[] = [
+    {
+      mode: "command-location",
+      label: "insert where command was typed"
+    },
+    {
+      mode: "below-current-line",
+      label: "insert below current line"
+    },
+    {
+      mode: "current-cursor",
+      label: "insert at cursor"
+    },
+    {
+      mode: "end-of-document",
+      label: "append to note"
+    }
+  ];
+
+  if (nearestHeading) {
+    placements.splice(1, 0, {
+      mode: "after-nearest-heading",
+      label: "insert after section",
+      heading: nearestHeading.title
+    });
+  }
+
+  const preferredPlacement = getPlacementFromModelSuggestion(modelPlacement, documentText, anchor);
+
+  if (!preferredPlacement) {
+    return placements;
+  }
+
+  return [
+    preferredPlacement,
+    ...placements.filter((placement) => (
+      placement.mode !== preferredPlacement.mode ||
+      placement.heading !== preferredPlacement.heading
+    ))
+  ];
+}
+
+function stripJsonCodeFence(text: string) {
+  const trimmed = text.trim();
+  const fencedMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fencedMatch ? fencedMatch[1].trim() : trimmed;
+}
+
+function parseAiModelResponse(text: string): AiModelResponse {
+  try {
+    const parsed = JSON.parse(stripJsonCodeFence(text)) as Partial<AiModelResponse>;
+
+    if (typeof parsed.answer === "string" && parsed.answer.trim()) {
+      return {
+        answer: parsed.answer.trim(),
+        placement: parsed.placement
+      };
+    }
+  } catch {
+    // Fall back to treating the model text as the answer.
+  }
+
+  return {
+    answer: text.trim()
+  };
+}
+
+function buildAiInstruction(prompt: string, documentText: string, anchor: number) {
+  const lineStart = documentText.lastIndexOf("\n", Math.max(0, anchor - 1)) + 1;
+  const nextLineBreak = documentText.indexOf("\n", anchor);
+  const lineEnd = nextLineBreak === -1 ? documentText.length : nextLineBreak;
+  const surroundingStart = Math.max(0, documentText.lastIndexOf("\n\n", Math.max(0, anchor - 1)));
+  const surroundingEndRaw = documentText.indexOf("\n\n", anchor);
+  const surroundingEnd = surroundingEndRaw === -1 ? documentText.length : surroundingEndRaw;
+  const headings = getMarkdownHeadings(documentText).map((heading) => heading.title);
+
+  return [
+    "You are the AI writing assistant inside x2pad, a keyboard-first note editor.",
+    "Use the document as context, then answer the user's prompt.",
+    "Also suggest where the response should be inserted.",
+    "Return only valid JSON with this shape:",
+    "{\"answer\":\"...\",\"placement\":{\"mode\":\"command-location|below-current-line|after-nearest-heading|end-of-document\",\"heading\":\"optional exact heading\"}}",
+    "",
+    `User prompt: ${prompt}`,
+    `Cursor offset after command removal: ${anchor}`,
+    `Active line: ${documentText.slice(lineStart, lineEnd) || "(blank line)"}`,
+    `Nearby paragraph: ${documentText.slice(surroundingStart, surroundingEnd).trim() || "(none)"}`,
+    `Headings: ${headings.length ? headings.join(" | ") : "(none)"}`,
+    "",
+    "Full document:",
+    documentText || "(empty document)"
+  ].join("\n");
+}
+
+function getMockAiResponse(prompt: string): AiModelResponse {
+  return {
+    answer: [
+      `AI draft for: ${prompt}`,
+      "",
+      "This is a local preview response so you can test the keyboard flow. Save a Gemini API key to generate a real answer with full document context."
+    ].join("\n"),
+    placement: {
+      mode: "command-location"
+    }
+  };
+}
+
+function getGeminiText(responseBody: any) {
+  const parts = responseBody?.candidates?.[0]?.content?.parts;
+
+  if (!Array.isArray(parts)) {
+    return "";
+  }
+
+  return parts
+    .map((part) => typeof part?.text === "string" ? part.text : "")
+    .join("")
+    .trim();
+}
+
+async function requestGeminiAiResponse(apiKey: string, prompt: string, documentText: string, anchor: number) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: buildAiInstruction(prompt, documentText, anchor)
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.3,
+          responseMimeType: "application/json"
+        }
+      })
+    }
+  );
+
+  const responseBody = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    const message = responseBody?.error?.message || `Gemini request failed (${response.status}).`;
+    throw new Error(message);
+  }
+
+  const text = getGeminiText(responseBody);
+
+  if (!text) {
+    throw new Error("Gemini returned an empty response.");
+  }
+
+  return parseAiModelResponse(text);
 }
 
 function ensurePathExtension(path: string, extension: "x2" | "pdf") {
@@ -523,6 +841,7 @@ function Editor() {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [apiKeyStatus, setApiKeyStatus] = useState("");
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
+  const [aiSession, setAiSession] = useState<AiSession | null>(null);
 
   const [selectedFont, setSelectedFont] = useState("Body");
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
@@ -664,6 +983,16 @@ function Editor() {
     }
   }, [apiKeyInput]);
 
+  const getSavedGeminiApiKey = useCallback(async () => {
+    const isTauri = "__TAURI_INTERNALS__" in window;
+
+    if (isTauri) {
+      return (await invoke<string | null>("get_gemini_api_key"))?.trim() ?? "";
+    }
+
+    return window.localStorage.getItem(BROWSER_GEMINI_API_KEY_STORAGE_KEY)?.trim() ?? "";
+  }, []);
+
   const runFileCommand = useCallback(async (
     commandName: "save" | "open" | "export",
     documentText: string,
@@ -761,6 +1090,163 @@ function Editor() {
     }
   }, [openLoadedX2Note]);
 
+  const runAiCommandAtCursor = useCallback((view: EditorView) => {
+    const pendingAiCommand = getAiCommandAtCursor(view);
+
+    if (!pendingAiCommand) {
+      return false;
+    }
+
+    const documentText = (
+      view.state.doc.sliceString(0, pendingAiCommand.from) +
+      view.state.doc.sliceString(pendingAiCommand.to)
+    );
+    const documentStyles = removeTextRangeFromStyleRanges(
+      styleRangesRef.current,
+      pendingAiCommand.from,
+      pendingAiCommand.to
+    );
+    const sessionId = `${Date.now()}-${Math.random()}`;
+    const anchor = pendingAiCommand.from;
+    const activeLineTo = Math.max(anchor, pendingAiCommand.lineTo - (pendingAiCommand.to - pendingAiCommand.from));
+
+    forcedStyleRangesRef.current = documentStyles;
+    view.dispatch({
+      changes: {
+        from: pendingAiCommand.from,
+        to: pendingAiCommand.to,
+        insert: ""
+      },
+      selection: { anchor }
+    });
+    setShowCommands(false);
+    setCommandQuery("");
+    setAiSession({
+      id: sessionId,
+      status: "thinking",
+      prompt: pendingAiCommand.prompt,
+      anchor,
+      activeLineTo,
+      answer: "",
+      placements: [],
+      placementIndex: 0
+    });
+
+    void (async () => {
+      try {
+        const apiKey = await getSavedGeminiApiKey();
+        const modelResponse = apiKey
+          ? await requestGeminiAiResponse(apiKey, pendingAiCommand.prompt, documentText, anchor)
+          : getMockAiResponse(pendingAiCommand.prompt);
+
+        setAiSession((currentSession) => {
+          if (!currentSession || currentSession.id !== sessionId) {
+            return currentSession;
+          }
+
+          return {
+            ...currentSession,
+            status: "ready",
+            answer: modelResponse.answer,
+            placements: getAiPlacements(documentText, anchor, modelResponse.placement),
+            placementIndex: 0,
+            isMock: !apiKey
+          };
+        });
+      } catch (error) {
+        setAiSession((currentSession) => {
+          if (!currentSession || currentSession.id !== sessionId) {
+            return currentSession;
+          }
+
+          return {
+            ...currentSession,
+            status: "error",
+            error: error instanceof Error ? error.message : String(error)
+          };
+        });
+      }
+    })();
+
+    return true;
+  }, [getSavedGeminiApiKey]);
+
+  const cycleAiPlacement = useCallback(() => {
+    setAiSession((currentSession) => {
+      if (!currentSession || currentSession.status !== "ready" || currentSession.placements.length <= 1) {
+        return currentSession;
+      }
+
+      return {
+        ...currentSession,
+        placementIndex: (currentSession.placementIndex + 1) % currentSession.placements.length
+      };
+    });
+    return true;
+  }, []);
+
+  const cancelAiSession = useCallback(() => {
+    setAiSession(null);
+    editorViewRef.current?.focus();
+    return true;
+  }, []);
+
+  const acceptAiSession = useCallback((view: EditorView) => {
+    const currentSession = aiSession;
+
+    if (!currentSession || currentSession.status !== "ready") {
+      return false;
+    }
+
+    const placement = currentSession.placements[currentSession.placementIndex];
+
+    if (!placement) {
+      return false;
+    }
+
+    const doc = view.state.doc;
+    const docText = doc.toString();
+    const clampedAnchor = Math.max(0, Math.min(currentSession.anchor, doc.length));
+    let insertAt = clampedAnchor;
+    let insertText = currentSession.answer;
+
+    if (placement.mode === "current-cursor") {
+      insertAt = view.state.selection.main.head;
+    } else if (placement.mode === "below-current-line") {
+      const line = doc.lineAt(Math.max(0, Math.min(currentSession.activeLineTo, doc.length)));
+      insertAt = line.to;
+      insertText = `\n${currentSession.answer}`;
+    } else if (placement.mode === "after-nearest-heading") {
+      const heading = placement.heading
+        ? getMarkdownHeadings(docText).find((candidate) => candidate.title === placement.heading)
+        : getNearestPreviousHeading(docText, clampedAnchor);
+
+      if (heading) {
+        const nextHeading = getMarkdownHeadings(docText).find((candidate) => (
+          candidate.from > heading.from && candidate.level <= heading.level
+        ));
+        insertAt = nextHeading ? Math.max(0, nextHeading.from - 1) : doc.length;
+        insertText = `${docText.slice(Math.max(0, insertAt - 2), insertAt).trim() ? "\n\n" : ""}${currentSession.answer}`;
+      }
+    } else if (placement.mode === "end-of-document") {
+      insertAt = doc.length;
+      insertText = `${docText.endsWith("\n\n") || docText.length === 0 ? "" : docText.endsWith("\n") ? "\n" : "\n\n"}${currentSession.answer}`;
+    }
+
+    view.dispatch({
+      changes: {
+        from: insertAt,
+        to: insertAt,
+        insert: insertText
+      },
+      selection: { anchor: insertAt + insertText.length },
+      scrollIntoView: true
+    });
+    setAiSession(null);
+    view.focus();
+    return true;
+  }, [aiSession]);
+
   const runCommandAtCursor = useCallback((view: EditorView) => {
     const pendingCommand = getCommandAtCursor(view);
 
@@ -849,7 +1335,15 @@ function Editor() {
     Prec.highest(keymap.of([
       {
         key: "Enter",
-        run: (view) => runCommandAtCursor(view) || continueListAtCursor(view)
+        run: (view) => acceptAiSession(view) || runAiCommandAtCursor(view) || runCommandAtCursor(view) || continueListAtCursor(view)
+      },
+      {
+        key: "Tab",
+        run: () => aiSession?.status === "ready" ? cycleAiPlacement() : false
+      },
+      {
+        key: "Escape",
+        run: () => aiSession ? cancelAiSession() : false
       },
       {
         key: "Backspace",
@@ -941,7 +1435,20 @@ function Editor() {
         display: "none"
       }
     })
-  ], [fontSize, textColor, isBold, isItalic, isStrike, isUnderline, runCommandAtCursor]);
+  ], [
+    fontSize,
+    textColor,
+    isBold,
+    isItalic,
+    isStrike,
+    isUnderline,
+    acceptAiSession,
+    aiSession,
+    cancelAiSession,
+    cycleAiPlacement,
+    runAiCommandAtCursor,
+    runCommandAtCursor
+  ]);
 
   const onChange = useCallback((val: string, viewUpdate: any) => {
     setValue(val);
@@ -981,6 +1488,10 @@ function Editor() {
     isUnderline ? "U" : null,
     isStrike ? "S" : null
   ].filter(Boolean).join(" · ");
+
+  const activeAiPlacement = aiSession?.status === "ready"
+    ? aiSession.placements[aiSession.placementIndex]
+    : null;
 
   const handleSidebarKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (!["ArrowUp", "ArrowDown", "Home", "End", "Enter"].includes(event.key)) {
@@ -1117,7 +1628,29 @@ function Editor() {
 
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (aiSession?.status === "ready" && event.key === "Enter") {
+        const editorView = editorViewRef.current;
+
+        if (editorView && document.activeElement !== editorView.contentDOM) {
+          event.preventDefault();
+          acceptAiSession(editorView);
+          return;
+        }
+      }
+
+      if (aiSession?.status === "ready" && event.key === "Tab") {
+        event.preventDefault();
+        cycleAiPlacement();
+        return;
+      }
+
       if (event.key !== "Escape") {
+        return;
+      }
+
+      if (aiSession) {
+        event.preventDefault();
+        cancelAiSession();
         return;
       }
 
@@ -1139,7 +1672,7 @@ function Editor() {
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [focusSidebarOnActiveNote, showCommands]);
+  }, [acceptAiSession, aiSession, cancelAiSession, cycleAiPlacement, focusSidebarOnActiveNote, showCommands]);
 
   return (
     <div className="editor-shell">
@@ -1267,6 +1800,27 @@ function Editor() {
                     No commands match //{commandQuery}
                   </div>
                 )}
+              </div>
+            )}
+
+            {aiSession && (
+              <div className={`ai-island ${aiSession.status}`} role="status" aria-live="polite">
+                <div className="ai-island-mark" aria-hidden="true" />
+                <div className="ai-island-content">
+                  <div className="ai-island-title">
+                    {aiSession.status === "thinking" && "AI thinking"}
+                    {aiSession.status === "ready" && (aiSession.isMock ? "AI preview ready" : "AI ready")}
+                    {aiSession.status === "error" && "AI stopped"}
+                  </div>
+                  <div className="ai-island-detail">
+                    {aiSession.status === "thinking" && "Reading the note context"}
+                    {aiSession.status === "ready" && activeAiPlacement && `Ready: ${getAiPlacementLabel(activeAiPlacement)}`}
+                    {aiSession.status === "error" && (aiSession.error || "Something went wrong")}
+                  </div>
+                  <div className="ai-island-keys">
+                    {aiSession.status === "ready" ? "Enter accept  Tab move  Esc cancel" : "Esc cancel"}
+                  </div>
+                </div>
               </div>
             )}
           </section>
