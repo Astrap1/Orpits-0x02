@@ -96,7 +96,7 @@ const resetTextStyle = ({
   return true;
 };
 
-const notImplemented = () => false;
+const handledByEditor = () => true;
 
 const colorAliases = TEXT_COLOR_OPTIONS.reduce<Record<string, string>>((aliases, color) => {
   aliases[color.name] = color.label;
@@ -106,28 +106,18 @@ const colorAliases = TEXT_COLOR_OPTIONS.reduce<Record<string, string>>((aliases,
 // Central registry for all keyboard-driven actions
 export const CommandRegistry: Command[] = [
   {
-    name: "table",
-    description: "Insert a 1x1 grid",
-    action: notImplemented
-  },
-  {
-    name: "code",
-    description: "Create a sandboxed code block",
-    action: notImplemented
-  },
-  {
     name: "title",
-    description: "Change font size",
+    description: "Use title text",
     action: setFontSizeCommand("Title", 24)
   },
   {
     name: "header",
-    description: "Change font size",
+    description: "Use header text",
     action: setFontSizeCommand("Header", 16)
   },
   {
     name: "body",
-    description: "Change font size",
+    description: "Use body text",
     action: setFontSizeCommand("Body", 14)
   },
   {
@@ -195,11 +185,6 @@ export const CommandRegistry: Command[] = [
     action: insertListMarker("1. ")
   },
   {
-    name: "linebreak",
-    description: "Insert a linebreak",
-    action: notImplemented
-  },
-  {
     name: "date",
     description: "Insert the date",
     action: insertCurrentDate
@@ -216,22 +201,12 @@ export const CommandRegistry: Command[] = [
   },
   {
     name: "save",
-    description: "Save note",
-    action: notImplemented
-  },
-  {
-    name: "new",
-    description: "Create a new .x2 note",
-    action: notImplemented
-  },
-  {
-    name: "open",
-    description: "Open .x2 note",
-    action: notImplemented
+    description: "Save the current .x2 note",
+    action: handledByEditor
   },
   {
     name: "export",
-    description: "Export note",
-    action: notImplemented
+    description: "Export the current note as PDF",
+    action: handledByEditor
   }
 ];

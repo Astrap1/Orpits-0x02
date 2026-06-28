@@ -159,7 +159,6 @@ This screenshot shows the AI response ready state. The user can press `Tab` to s
                 <li>//size</li>
                 <li>//color</li>
                 <li>//bulletlist, //numberlist</li>
-                <li>//linebreak</li>
                 <li>//code</li>
                 <li>//table</li>
                 <li>//date, //time</li>

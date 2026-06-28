@@ -19,7 +19,6 @@ const PDF_BODY_MAX_WIDTH_MM: f32 = PDF_PAGE_WIDTH_MM - (PDF_MARGIN_MM * 2.0);
 const PDF_DEFAULT_TEXT_COLOR: &str = "White";
 const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
 const NOTE_FOLDER_SETTINGS_FILE: &str = "note-folder-settings.json";
-const DEFAULT_NOTE_FOLDER_PATH: &str = r"C:\Users\zj040\Projects\Orbital";
 
 #[derive(Deserialize)]
 struct NotePayload {
@@ -164,6 +163,23 @@ fn load_x2_folder(app: AppHandle, path: String) -> Result<LoadedX2Folder, String
 }
 
 #[tauri::command]
+fn has_note_folder(app: AppHandle) -> Result<bool, String> {
+    Ok(get_configured_note_folder_path(&app)?.is_some())
+}
+
+#[tauri::command]
+fn set_note_folder(app: AppHandle, path: String) -> Result<LoadedX2Folder, String> {
+    let directory = PathBuf::from(path);
+
+    if !directory.is_dir() {
+        return Err("Choose a folder for your .x2 notes.".to_string());
+    }
+
+    remember_note_directory(&app, &directory)?;
+    load_x2_folder_from_path(&directory)
+}
+
+#[tauri::command]
 fn load_startup_x2_note() -> Result<Option<LoadedX2Note>, String> {
     let Some(path) = find_x2_path(std::env::args().skip(1)) else {
         return Ok(None);
@@ -178,17 +194,18 @@ fn load_startup_x2_folder(app: AppHandle) -> Result<Option<LoadedX2Folder>, Stri
         return load_x2_folder(app, path).map(Some);
     }
 
-    let directory = get_default_note_folder_path(&app)?;
-    let Some(path) = find_first_x2_path(&directory)? else {
+    let Some(directory) = get_configured_note_folder_path(&app)? else {
         return Ok(None);
     };
 
-    load_x2_folder(app, path.to_string_lossy().to_string()).map(Some)
+    load_x2_folder(app, directory.to_string_lossy().to_string()).map(Some)
 }
 
 #[tauri::command]
 fn get_default_note_folder(app: AppHandle) -> Result<String, String> {
-    get_default_note_folder_path(&app).map(|path| path.to_string_lossy().to_string())
+    get_configured_note_folder_path(&app)?
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or_else(|| "Choose a notes folder before saving.".to_string())
 }
 
 #[tauri::command]
@@ -341,7 +358,7 @@ fn note_folder_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(directory.join(NOTE_FOLDER_SETTINGS_FILE))
 }
 
-fn get_default_note_folder_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn get_configured_note_folder_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let settings_path = note_folder_settings_path(app)?;
 
     if settings_path.exists() {
@@ -358,17 +375,13 @@ fn get_default_note_folder_path(app: &AppHandle) -> Result<PathBuf, String> {
                     .is_some_and(|legacy_path| paths_match(&configured_path, legacy_path));
 
                 if configured_path.is_dir() && !is_legacy_default {
-                    return Ok(configured_path);
+                    return Ok(Some(configured_path));
                 }
             }
         }
     }
 
-    let default_directory = PathBuf::from(DEFAULT_NOTE_FOLDER_PATH);
-    std::fs::create_dir_all(&default_directory)
-        .map_err(|error| format!("Could not create the default note folder: {error}"))?;
-    remember_note_directory(app, &default_directory)?;
-    Ok(default_directory)
+    Ok(None)
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {
@@ -406,40 +419,19 @@ fn remember_note_directory(app: &AppHandle, directory: &Path) -> Result<(), Stri
         .map_err(|error| format!("Could not save note folder settings: {error}"))
 }
 
-fn find_first_x2_path(directory: &Path) -> Result<Option<PathBuf>, String> {
-    let mut paths = std::fs::read_dir(directory)
-        .map_err(|error| format!("Could not read the note folder: {error}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| is_x2_path(path.to_string_lossy().as_ref()))
-        .collect::<Vec<_>>();
-
-    paths.sort_by(|left, right| {
-        left.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_lowercase()
-            .cmp(
-                &right
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default()
-                    .to_lowercase(),
-            )
-    });
-
-    Ok(paths.into_iter().next())
-}
-
 fn load_x2_folder_from_path(path: &Path) -> Result<LoadedX2Folder, String> {
-    if !is_x2_path(path.to_string_lossy().as_ref()) {
+    if !path.is_dir() && !is_x2_path(path.to_string_lossy().as_ref()) {
         return Err("Only .x2 note files can be opened.".to_string());
     }
 
-    let active_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let directory = active_path
-        .parent()
-        .ok_or_else(|| "Could not determine the note folder.".to_string())?;
+    let selected_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let directory = if selected_path.is_dir() {
+        selected_path.as_path()
+    } else {
+        selected_path
+            .parent()
+            .ok_or_else(|| "Could not determine the note folder.".to_string())?
+    };
     let mut note_paths = std::fs::read_dir(directory)
         .map_err(|error| format!("Could not read the note folder: {error}"))?
         .filter_map(Result::ok)
@@ -461,16 +453,20 @@ fn load_x2_folder_from_path(path: &Path) -> Result<LoadedX2Folder, String> {
             )
     });
 
+    let active_path = if selected_path.is_dir() {
+        note_paths
+            .first()
+            .cloned()
+            .unwrap_or_else(|| selected_path.clone())
+    } else {
+        selected_path.clone()
+    };
     let mut notes = Vec::new();
 
     for note_path in note_paths {
         if let Ok(note) = load_x2_note_from_path(&note_path) {
             notes.push(note);
         }
-    }
-
-    if notes.is_empty() {
-        return Err("No valid .x2 notes were found in this folder.".to_string());
     }
 
     Ok(LoadedX2Folder {
@@ -826,6 +822,8 @@ pub fn run() {
             save_x2_note,
             load_x2_note,
             load_x2_folder,
+            has_note_folder,
+            set_note_folder,
             load_startup_x2_note,
             load_startup_x2_folder,
             get_default_note_folder,

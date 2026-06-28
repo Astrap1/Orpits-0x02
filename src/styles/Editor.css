@@ -293,6 +293,22 @@ input {
   white-space: nowrap;
 }
 
+.new-note-link {
+  margin-bottom: 6px;
+  border: 1px solid rgba(196, 167, 255, 0.18);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.new-note-link:hover,
+.new-note-link:focus-visible,
+.new-note-link.active {
+  border-color: rgba(196, 167, 255, 0.38);
+}
+
+.new-note-link .note-link-meta {
+  color: #b8aecb;
+}
+
 .flow-status {
   display: flex;
   flex-direction: column;
@@ -756,6 +772,119 @@ input {
   opacity: 0.64;
 }
 
+.setup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(7, 7, 9, 0.72);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+}
+
+.setup-panel {
+  display: grid;
+  gap: 14px;
+  width: min(430px, 100%);
+  padding: 22px;
+  border: 1px solid rgba(196, 167, 255, 0.22);
+  border-radius: 18px;
+  background: rgba(18, 19, 24, 0.97);
+  box-shadow: 0 28px 82px rgba(0, 0, 0, 0.52);
+}
+
+.setup-progress {
+  color: #9c94aa;
+  font-size: 11px;
+  font-weight: 780;
+  text-transform: uppercase;
+}
+
+.setup-panel h1 {
+  margin: 0;
+  color: #fffaff;
+  font-size: 22px;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.setup-panel p {
+  margin: 0;
+  color: #bdb5cb;
+  font-size: 13px;
+  font-weight: 560;
+  line-height: 1.55;
+}
+
+.setup-panel input {
+  width: 100%;
+  min-width: 0;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  outline: 0;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f8f1ff;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.setup-panel input:focus {
+  border-color: rgba(196, 167, 255, 0.52);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.13);
+}
+
+.setup-panel input::placeholder {
+  color: #807889;
+}
+
+.setup-status {
+  color: #ffb4bd;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.setup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.setup-actions button {
+  min-height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #d8d1e5;
+  padding: 0 13px;
+  font-size: 12px;
+  font-weight: 740;
+  cursor: default;
+}
+
+.setup-actions button:first-child {
+  border-color: rgba(196, 167, 255, 0.38);
+  background: rgba(124, 58, 237, 0.28);
+  color: #f5edff;
+}
+
+.setup-actions button:hover,
+.setup-actions button:focus-visible {
+  outline: 0;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.setup-actions button:first-child:hover,
+.setup-actions button:first-child:focus-visible {
+  background: rgba(124, 58, 237, 0.36);
+}
+
+.setup-actions button:disabled {
+  opacity: 0.64;
+}
+
 @media (max-width: 860px) {
   .editor-shell {
     min-width: 0;
@@ -800,6 +929,10 @@ input {
   }
 
   .api-key-overlay {
+    padding: 16px;
+  }
+
+  .setup-overlay {
     padding: 16px;
   }
 }

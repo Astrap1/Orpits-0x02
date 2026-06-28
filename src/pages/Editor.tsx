@@ -21,6 +21,7 @@ const BROWSER_GEMINI_API_KEY_STORAGE_KEY = "x2pad.geminiApiKey";
 const GEMINI_MODEL = "gemini-3.5-flash";
 
 type AiSessionStatus = "thinking" | "ready" | "error";
+type SetupStep = "folder" | "gemini" | null;
 
 type AiPlacementMode =
   | "command-location"
@@ -842,6 +843,9 @@ function Editor() {
   const [fileStatus, setFileStatus] = useState("Ready");
   const [fileStatusKind, setFileStatusKind] = useState<"idle" | "success" | "error">("idle");
   const [showApiKeyPrompt, setShowApiKeyPrompt] = useState(false);
+  const [setupStep, setSetupStep] = useState<SetupStep>(null);
+  const [setupStatus, setSetupStatus] = useState("");
+  const [isSelectingNoteFolder, setIsSelectingNoteFolder] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [apiKeyStatus, setApiKeyStatus] = useState("");
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
@@ -894,7 +898,7 @@ function Editor() {
     const activeNoteIndex = filteredNotes.findIndex((note) => getPathKey(note.path) === activePathKey);
 
     if (activeNoteIndex >= 0) {
-      setSidebarSelection(activeNoteIndex + 1);
+      setSidebarSelection(activeNoteIndex + 2);
       setShowLogoPane(false);
     }
 
@@ -969,8 +973,19 @@ function Editor() {
       ?? folder.notes[0];
 
     if (!activeNote) {
-      setFileStatus("No valid .x2 notes were found in this folder.");
-      setFileStatusKind("error");
+      setOpenedNotes([]);
+      setOpenedNoteTitle(null);
+      setOpenedNotePath(null);
+      pendingStyleRestoreRef.current = {
+        content: "",
+        styles: []
+      };
+      setValue("");
+      setShowLogoPane(true);
+      setShowCommands(false);
+      setCommandQuery("");
+      setFileStatus("Notes folder selected. Create your first note.");
+      setFileStatusKind("success");
       return;
     }
 
@@ -985,6 +1000,42 @@ function Editor() {
     setShowCommands(false);
     setCommandQuery("");
   }, []);
+
+  const selectNoteFolder = useCallback(async () => {
+    const isTauri = "__TAURI_INTERNALS__" in window;
+
+    if (!isTauri) {
+      setSetupStatus("Folder setup requires the desktop app.");
+      return;
+    }
+
+    setIsSelectingNoteFolder(true);
+    setSetupStatus("");
+
+    try {
+      const selectedPath = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose x2pad notes folder"
+      });
+
+      if (!selectedPath || Array.isArray(selectedPath)) {
+        setSetupStatus("Choose a folder to continue.");
+        return;
+      }
+
+      const folder = await invoke<LoadedX2Folder>("set_note_folder", { path: selectedPath });
+      openLoadedX2Folder(folder);
+      const hasGeminiKey = await invoke<boolean>("has_gemini_api_key").catch(() => false);
+
+      setSetupStatus("");
+      setSetupStep(hasGeminiKey ? null : "gemini");
+    } catch (error) {
+      setSetupStatus(String(error));
+    } finally {
+      setIsSelectingNoteFolder(false);
+    }
+  }, [openLoadedX2Folder]);
 
   const saveGeminiApiKey = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1010,6 +1061,9 @@ function Editor() {
 
       setApiKeyInput("");
       setShowApiKeyPrompt(false);
+      if (setupStep === "gemini") {
+        setSetupStep(null);
+      }
       setFileStatus("Gemini key saved.");
       setFileStatusKind("success");
     } catch (error) {
@@ -1017,7 +1071,7 @@ function Editor() {
     } finally {
       setIsSavingApiKey(false);
     }
-  }, [apiKeyInput]);
+  }, [apiKeyInput, setupStep]);
 
   const getSavedGeminiApiKey = useCallback(async () => {
     const isTauri = "__TAURI_INTERNALS__" in window;
@@ -1195,6 +1249,15 @@ function Editor() {
       setFileStatusKind("error");
     }
   }, [openLoadedX2Folder]);
+
+  const createNewNote = useCallback(() => {
+    const currentStyles = styleRangesRef.current.map((range) => ({
+      ...range,
+      style: { ...range.style }
+    }));
+
+    void runFileCommand("new", value, activeNoteTitle, openedNotePath, currentStyles);
+  }, [activeNoteTitle, openedNotePath, runFileCommand, value]);
 
   const runAiCommandAtCursor = useCallback((view: EditorView) => {
     const pendingAiCommand = getAiCommandAtCursor(view);
@@ -1612,7 +1675,12 @@ function Editor() {
         return;
       }
 
-      const selectedNote = filteredNotes[sidebarSelection - 1];
+      if (sidebarSelection === 1) {
+        createNewNote();
+        return;
+      }
+
+      const selectedNote = filteredNotes[sidebarSelection - 2];
       if (selectedNote) {
         activateOpenedNote(selectedNote.path);
         focusEditorAtStart();
@@ -1620,7 +1688,7 @@ function Editor() {
       return;
     }
 
-    const maxSelection = filteredNotes.length;
+    const maxSelection = filteredNotes.length + 1;
     let nextSelection = sidebarSelection;
 
     if (event.key === "ArrowUp") {
@@ -1640,7 +1708,11 @@ function Editor() {
       return;
     }
 
-    const selectedNote = filteredNotes[nextSelection - 1];
+    if (nextSelection === 1) {
+      return;
+    }
+
+    const selectedNote = filteredNotes[nextSelection - 2];
     if (selectedNote) {
       activateOpenedNote(selectedNote.path);
     }
@@ -1650,7 +1722,7 @@ function Editor() {
     const activePathKey = getPathKey(openedNotePath ?? "");
     const noteIndex = filteredNotes.findIndex((note) => getPathKey(note.path) === activePathKey);
     if (noteIndex >= 0 && !showLogoPane) {
-      setSidebarSelection(noteIndex + 1);
+      setSidebarSelection(noteIndex + 2);
     }
   }, [filteredNotes, openedNotePath, showLogoPane]);
 
@@ -1659,6 +1731,7 @@ function Editor() {
   }, []);
 
   useEffect(() => {
+    let isCurrent = true;
     const isTauri = "__TAURI_INTERNALS__" in window;
 
     if (!isTauri) {
@@ -1666,18 +1739,48 @@ function Editor() {
       return;
     }
 
-    void invoke<boolean>("has_gemini_api_key")
-      .then((hasApiKey) => {
-        setShowApiKeyPrompt(!hasApiKey);
-      })
-      .catch((error) => {
-        setApiKeyStatus(String(error));
-        setShowApiKeyPrompt(true);
-      });
-  }, []);
+    void (async () => {
+      try {
+        const folder = await invoke<LoadedX2Folder | null>("load_startup_x2_folder");
+
+        if (!isCurrent) {
+          return;
+        }
+
+        if (!folder) {
+          const hasNoteFolder = await invoke<boolean>("has_note_folder").catch(() => false);
+
+          if (!isCurrent) {
+            return;
+          }
+
+          if (!hasNoteFolder) {
+            setSetupStep("folder");
+            return;
+          }
+        } else {
+          openLoadedX2Folder(folder);
+        }
+
+        const hasApiKey = await invoke<boolean>("has_gemini_api_key").catch(() => false);
+
+        if (isCurrent && !hasApiKey) {
+          setSetupStep("gemini");
+        }
+      } catch (error) {
+        setFileStatus(String(error));
+        setFileStatusKind("error");
+        setSetupStep("folder");
+      }
+    })();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [openLoadedX2Folder]);
 
   useEffect(() => {
-    if (!showApiKeyPrompt) {
+    if (!showApiKeyPrompt && setupStep !== "gemini") {
       return;
     }
 
@@ -1686,28 +1789,7 @@ function Editor() {
     });
 
     return () => cancelAnimationFrame(animationFrame);
-  }, [showApiKeyPrompt]);
-
-  useEffect(() => {
-    const isTauri = "__TAURI_INTERNALS__" in window;
-
-    if (!isTauri) {
-      return;
-    }
-
-    void invoke<LoadedX2Folder | null>("load_startup_x2_folder")
-      .then((folder) => {
-        if (!folder) {
-          return;
-        }
-
-        openLoadedX2Folder(folder);
-      })
-      .catch((error) => {
-        setFileStatus(String(error));
-        setFileStatusKind("error");
-      });
-  }, [openLoadedX2Folder]);
+  }, [showApiKeyPrompt, setupStep]);
 
   useEffect(() => {
     if (!pendingStyleRestoreRef.current || !editorViewRef.current) {
@@ -1815,14 +1897,25 @@ function Editor() {
           </label>
 
           <nav className="notes-nav" aria-label="Notes">
+            <button
+              type="button"
+              className={`note-link new-note-link ${sidebarSelection === 1 ? "active" : ""}`}
+              onMouseEnter={() => setSidebarSelection(1)}
+              onFocus={() => setSidebarSelection(1)}
+              onClick={createNewNote}
+            >
+              <span className="note-link-title">+ New note</span>
+              <span className="note-link-meta">Create .x2</span>
+            </button>
+
             {filteredNotes.length === 0 && (
               <div className="notes-empty">
-                {openedNotes.length === 0 ? "Open an .x2 file to load its folder." : "No matching notes."}
+                {openedNotes.length === 0 ? "Create a note to start this folder." : "No matching notes."}
               </div>
             )}
 
             {filteredNotes.map((note, index) => {
-              const selectionIndex = index + 1;
+              const selectionIndex = index + 2;
               const isSelected = sidebarSelection === selectionIndex;
               const isActive = getPathKey(openedNotePath ?? "") === getPathKey(note.path) && !showLogoPane;
 
@@ -1941,7 +2034,70 @@ function Editor() {
         </main>
       </div>
 
-      {showApiKeyPrompt && (
+      {setupStep && (
+        <div className="setup-overlay">
+          {setupStep === "folder" ? (
+            <section className="setup-panel" aria-labelledby="setup-folder-title">
+              <div className="setup-progress">Step 1 of 2</div>
+              <h1 id="setup-folder-title">Choose your notes folder</h1>
+              <p>
+                x2pad stores notes as local .x2 files and loads the folder into the sidebar.
+              </p>
+              {setupStatus && (
+                <div className="setup-status" role="status">
+                  {setupStatus}
+                </div>
+              )}
+              <div className="setup-actions">
+                <button type="button" onClick={selectNoteFolder} disabled={isSelectingNoteFolder}>
+                  {isSelectingNoteFolder ? "Selecting..." : "Select folder"}
+                </button>
+              </div>
+            </section>
+          ) : (
+            <form className="setup-panel" onSubmit={saveGeminiApiKey} aria-labelledby="setup-gemini-title">
+              <div className="setup-progress">Step 2 of 2</div>
+              <h1 id="setup-gemini-title">Connect Gemini</h1>
+              <p>
+                Add a Gemini API key for AI writing commands, or skip this for now.
+              </p>
+              <input
+                ref={apiKeyInputRef}
+                type="password"
+                value={apiKeyInput}
+                placeholder="Paste key"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(event) => {
+                  setApiKeyInput(event.target.value);
+                  setApiKeyStatus("");
+                }}
+              />
+              {apiKeyStatus && (
+                <div className="setup-status" role="status">
+                  {apiKeyStatus}
+                </div>
+              )}
+              <div className="setup-actions">
+                <button type="submit" disabled={isSavingApiKey}>
+                  {isSavingApiKey ? "Saving..." : "Save key"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setApiKeyStatus("");
+                    setSetupStep(null);
+                  }}
+                >
+                  Skip
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      )}
+
+      {showApiKeyPrompt && !setupStep && (
         <div className="api-key-overlay">
           <form className="api-key-bubble" onSubmit={saveGeminiApiKey}>
             <div className="api-key-bubble-header">
