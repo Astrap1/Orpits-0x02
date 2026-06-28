@@ -16,7 +16,8 @@ const PDF_TITLE_FONT_SIZE: f32 = 18.0;
 const PDF_BODY_FONT_SIZE: f32 = 11.0;
 const PDF_BODY_LINE_HEIGHT_MM: f32 = 6.0;
 const PDF_BODY_MAX_WIDTH_MM: f32 = PDF_PAGE_WIDTH_MM - (PDF_MARGIN_MM * 2.0);
-const PDF_DEFAULT_TEXT_COLOR: &str = "White";
+const PDF_DEFAULT_TEXT_COLOR: &str = "Black";
+const PDF_POINT_TO_MM: f32 = 0.352_778;
 const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
 const NOTE_FOLDER_SETTINGS_FILE: &str = "note-folder-settings.json";
 
@@ -242,6 +243,7 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
 
     let mut current_layer = document.get_page(page).get_layer(layer);
     let mut cursor_y = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM;
+    current_layer.set_fill_color(pdf_color(PDF_DEFAULT_TEXT_COLOR));
     write_pdf_line(
         &current_layer,
         title,
@@ -727,24 +729,28 @@ fn pdf_font_size(style: &TextStyle) -> f32 {
 }
 
 fn estimate_pdf_text_width_mm(text: &str, style: &TextStyle) -> f32 {
-    let base_width = pdf_font_size(style) * 0.35;
+    let font_size_mm = pdf_font_size(style) * PDF_POINT_TO_MM;
     let bold_multiplier = if style.is_bold { 1.06 } else { 1.0 };
 
     text.chars()
         .map(|character| {
-            let width_multiplier = if character == ' ' {
-                0.48
-            } else if character.is_ascii_punctuation() {
-                0.62
-            } else if character.is_ascii_uppercase() {
-                1.05
-            } else {
-                1.0
-            };
-
-            base_width * width_multiplier * bold_multiplier
+            font_size_mm * pdf_character_width_em(character) * bold_multiplier
         })
         .sum()
+}
+
+fn pdf_character_width_em(character: char) -> f32 {
+    match character {
+        ' ' | '\t' => 0.28,
+        'i' | 'j' | 'l' | 'I' | '!' | '|' | '\'' | ':' | ';' | ',' | '.' => 0.25,
+        'f' | 'r' | 't' | '(' | ')' | '[' | ']' | '{' | '}' | '"' => 0.35,
+        'm' | 'w' | 'M' | 'W' => 0.82,
+        character if character.is_ascii_digit() => 0.56,
+        character if character.is_ascii_uppercase() => 0.67,
+        character if character.is_ascii_punctuation() => 0.42,
+        character if character.is_ascii() => 0.52,
+        _ => 0.6,
+    }
 }
 
 fn pdf_color(color: &str) -> Color {
@@ -756,8 +762,7 @@ fn pdf_color(color: &str) -> Color {
         "green" => "#8ee6a8".to_string(),
         "blue" => "#7aa2ff".to_string(),
         "purple" => "#c4a7ff".to_string(),
-        "black" => "#111111".to_string(),
-        "white" => "#f7f2ff".to_string(),
+        "black" | "white" => "#111111".to_string(),
         value => value.to_string(),
     };
 
