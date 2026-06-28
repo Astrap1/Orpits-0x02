@@ -3,13 +3,11 @@ Team Name: 0x02
 
 Proposed Level of Achievement: Apollo 11
 
-Poster: 
+Poster: https://drive.google.com/file/d/1HlmQSmKyazfOEh1AZi91UpB2ZltoFydT/view?usp=drive_link
 
-Video: 
+Video: https://drive.google.com/file/d/1XQnf3WxhFC2shKk1xLNM-pZRd3zSfNJH/view?usp=drive_link
 
-GitHub Repo: 
-
-App Download: 
+App Download: https://drive.google.com/file/d/1Xe2NOQxCawUEi9L9gnE2Ygp2jl3mmRxB/view?usp=drive_link
 
 # Motivation
 Modern note-taking apps often prioritise a "click-heavy" visual interface that disrupts the "flow state" of power users. For developers and students, the constant context-switching between the keyboard and mouse is an ergonomic bottleneck that slows down thought-to-text translation.
@@ -187,7 +185,7 @@ The save process works like this:
 2. The editor stores the note content as text and tracks formatting as style ranges.
 3. When the user runs `//save`, the app removes the command text from the editor and sends the note title, content, and style ranges to the Rust/Tauri backend.
 4. The backend converts the note into the `.x2` JSON structure and writes it to the user's local device.
-5. When the user runs `//open`, the app reads the selected `.x2` file, validates its format and version, reloads the note content, and reapplies the saved style ranges in the editor.
+5. When the user opens an existing `.x2` file through the app's file-opening interface, the app reads the selected file, validates its format and version, reloads the note content, and reapplies the saved style ranges in the editor.
 
 The current `.x2` file includes:
 - `format`: Identifies the file as an x2pad note file.
