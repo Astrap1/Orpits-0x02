@@ -57,7 +57,9 @@ This feature supports use cases such as idea expansion, summarisation, rewriting
 When the user types `\\` followed by a prompt, x2pad treats the input as an AI request. The prompt is sent to the Gemini API, and the response can be inserted back into the editor.
 
 Eg. `\\summarise this paragraph`
+
 Eg. `\\give me 3 essay points about climate change`
+
 Eg. `\\explain this code in simple terms`
 
 Currently, we require users to input their Gemini API key into the app in order to use this feature. Maybe in the future, we can create a tracking system, allow users to use the AI feature without having their own API key, and then pay at the end of the month. 
@@ -85,7 +87,9 @@ This improves the discoverability of commands. Since x2pad depends heavily on ty
 When the command menu opens, Fuse.js can compare the user's input against the list of available commands. Instead of only matching exact prefixes, it can return close matches.
 
 Eg. typing `//blt` could suggest `//bulletlist`
+
 Eg. typing `//wrd` could suggest `//wordcount`
+
 Eg. typing `//hdr` could suggest `//header`
 
 This makes the command system more forgiving and beginner-friendly.
@@ -321,8 +325,8 @@ In this milestone, we completed a usable version of the editor interface. The ed
 - `//strike` to enable strikethrough text
 - `//underline` to enable underlined text
 - `//default` to reset text formatting
-- `//size` to adjust the text size
-- `//color` to change the text color
+- `//size` to adjust the text size [Eg. `//size 16`]
+- `//color` to change the text color [Eg. `//color red`]
 - `//bulletlist` to add bullet points
 - `//numberlist` to start a numbered list
 - `//date` to add the date
