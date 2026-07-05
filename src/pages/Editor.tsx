@@ -81,6 +81,11 @@ interface TextStyleRange {
   style: ActiveTextStyle;
 }
 
+interface ParsedAiFormattedText {
+  text: string;
+  ranges: TextStyleRange[];
+}
+
 interface LoadedX2Note {
   title: string;
   content: string;
@@ -117,6 +122,8 @@ const defaultTextStyle: ActiveTextStyle = {
   isStrike: false,
   isUnderline: false
 };
+
+const AI_MARKDOWN_DELIMITERS = ["**", "__", "*", "_"] as const;
 
 const isDefaultTextStyle = (style: ActiveTextStyle) => (
   style.fontSize === defaultTextStyle.fontSize &&
@@ -265,6 +272,166 @@ function mapStyleRangesThroughChanges(
       to: Math.max(0, Math.min(changes.mapPos(range.to, -1), docLength))
     }))
     .filter((range) => range.from < range.to);
+}
+
+function isEscaped(text: string, index: number) {
+  let slashCount = 0;
+
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+    slashCount += 1;
+  }
+
+  return slashCount % 2 === 1;
+}
+
+function getAiMarkdownDelimiter(text: string, index: number) {
+  if (isEscaped(text, index)) {
+    return null;
+  }
+
+  return AI_MARKDOWN_DELIMITERS.find((delimiter) => text.startsWith(delimiter, index)) ?? null;
+}
+
+function canOpenAiMarkdownDelimiter(text: string, index: number, delimiter: string) {
+  const nextCharacter = text[index + delimiter.length];
+  return !!nextCharacter && !/\s/.test(nextCharacter);
+}
+
+function canCloseAiMarkdownDelimiter(text: string, index: number) {
+  const previousCharacter = text[index - 1];
+  return !!previousCharacter && !/\s/.test(previousCharacter);
+}
+
+function findAiMarkdownClosingDelimiter(text: string, from: number, delimiter: string) {
+  for (let index = from; index < text.length; index += 1) {
+    if (
+      text.startsWith(delimiter, index) &&
+      !isEscaped(text, index) &&
+      canCloseAiMarkdownDelimiter(text, index)
+    ) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function getAiMarkdownStyle(delimiter: string): ActiveTextStyle {
+  return {
+    ...defaultTextStyle,
+    isBold: delimiter !== "_",
+    isItalic: delimiter === "_"
+  };
+}
+
+function getAiMarkdownHeadingStyle(level: number): ActiveTextStyle {
+  return {
+    ...defaultTextStyle,
+    fontSize: level === 1 ? "24" : level === 2 ? "20" : "16",
+    isBold: true
+  };
+}
+
+function getAiMarkdownHeading(lineText: string) {
+  const match = lineText.match(/^[ \t]{0,3}(#{1,6})[ \t]+(.+?)\s*$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    level: match[1].length,
+    text: match[2]
+  };
+}
+
+function parseAiFormattedText(text: string): ParsedAiFormattedText {
+  let parsedText = "";
+  const ranges: TextStyleRange[] = [];
+  let index = 0;
+
+  while (index < text.length) {
+    if (index === 0 || text[index - 1] === "\n") {
+      const lineEnd = text.indexOf("\n", index);
+      const lineToParse = text.slice(index, lineEnd === -1 ? text.length : lineEnd);
+      const heading = getAiMarkdownHeading(lineToParse);
+
+      if (heading) {
+        const inner = parseAiFormattedText(heading.text);
+        const rangeFrom = parsedText.length;
+
+        parsedText += inner.text;
+        ranges.push(
+          ...inner.ranges.map((range) => ({
+            ...range,
+            from: rangeFrom + range.from,
+            to: rangeFrom + range.to
+          }))
+        );
+
+        if (inner.text.length > 0) {
+          ranges.push({
+            from: rangeFrom,
+            to: rangeFrom + inner.text.length,
+            style: getAiMarkdownHeadingStyle(heading.level)
+          });
+        }
+
+        index += lineToParse.length;
+        continue;
+      }
+    }
+
+    if (text[index] === "\\" && ["*", "_"].includes(text[index + 1] ?? "")) {
+      parsedText += text[index + 1];
+      index += 2;
+      continue;
+    }
+
+    const delimiter = getAiMarkdownDelimiter(text, index);
+
+    if (!delimiter || !canOpenAiMarkdownDelimiter(text, index, delimiter)) {
+      parsedText += text[index];
+      index += 1;
+      continue;
+    }
+
+    const innerFrom = index + delimiter.length;
+    const closingIndex = findAiMarkdownClosingDelimiter(text, innerFrom, delimiter);
+
+    if (closingIndex === -1) {
+      parsedText += text[index];
+      index += 1;
+      continue;
+    }
+
+    const inner = parseAiFormattedText(text.slice(innerFrom, closingIndex));
+    const rangeFrom = parsedText.length;
+
+    parsedText += inner.text;
+    ranges.push(
+      ...inner.ranges.map((range) => ({
+        ...range,
+        from: rangeFrom + range.from,
+        to: rangeFrom + range.to
+      }))
+    );
+
+    if (inner.text.length > 0) {
+      ranges.push({
+        from: rangeFrom,
+        to: rangeFrom + inner.text.length,
+        style: getAiMarkdownStyle(delimiter)
+      });
+    }
+
+    index = closingIndex + delimiter.length;
+  }
+
+  return {
+    text: parsedText,
+    ranges
+  };
 }
 
 function applyPendingStyleRestore(
@@ -1376,15 +1543,16 @@ function Editor() {
     const doc = view.state.doc;
     const docText = doc.toString();
     const clampedAnchor = Math.max(0, Math.min(currentSession.anchor, doc.length));
+    const parsedAnswer = parseAiFormattedText(currentSession.answer);
     let insertAt = clampedAnchor;
-    let insertText = currentSession.answer;
+    let insertPrefix = "";
 
     if (placement.mode === "current-cursor") {
       insertAt = view.state.selection.main.head;
     } else if (placement.mode === "below-current-line") {
       const line = doc.lineAt(Math.max(0, Math.min(currentSession.activeLineTo, doc.length)));
       insertAt = line.to;
-      insertText = `\n${currentSession.answer}`;
+      insertPrefix = "\n";
     } else if (placement.mode === "after-nearest-heading") {
       const heading = placement.heading
         ? getMarkdownHeadings(docText).find((candidate) => candidate.title === placement.heading)
@@ -1395,13 +1563,31 @@ function Editor() {
           candidate.from > heading.from && candidate.level <= heading.level
         ));
         insertAt = nextHeading ? Math.max(0, nextHeading.from - 1) : doc.length;
-        insertText = `${docText.slice(Math.max(0, insertAt - 2), insertAt).trim() ? "\n\n" : ""}${currentSession.answer}`;
+        insertPrefix = docText.slice(Math.max(0, insertAt - 2), insertAt).trim() ? "\n\n" : "";
       }
     } else if (placement.mode === "end-of-document") {
       insertAt = doc.length;
-      insertText = `${docText.endsWith("\n\n") || docText.length === 0 ? "" : docText.endsWith("\n") ? "\n" : "\n\n"}${currentSession.answer}`;
+      insertPrefix = docText.endsWith("\n\n") || docText.length === 0 ? "" : docText.endsWith("\n") ? "\n" : "\n\n";
     }
 
+    const insertText = `${insertPrefix}${parsedAnswer.text}`;
+    const changes = view.state.changes({
+      from: insertAt,
+      to: insertAt,
+      insert: insertText
+    });
+    const nextDocLength = doc.length + insertText.length;
+    const insertedStyleRanges = parsedAnswer.ranges.map((range) => ({
+      ...range,
+      from: insertAt + insertPrefix.length + range.from,
+      to: insertAt + insertPrefix.length + range.to
+    }));
+    const nextStyleRanges = [
+      ...mapStyleRangesThroughChanges(styleRangesRef.current, changes, nextDocLength),
+      ...insertedStyleRanges
+    ];
+
+    forcedStyleRangesRef.current = nextStyleRanges;
     view.dispatch({
       changes: {
         from: insertAt,
@@ -1409,7 +1595,8 @@ function Editor() {
         insert: insertText
       },
       selection: { anchor: insertAt + insertText.length },
-      scrollIntoView: true
+      scrollIntoView: true,
+      effects: replaceTextStyleDecorations.of(nextStyleRanges)
     });
     setAiSession(null);
     view.focus();
