@@ -203,12 +203,7 @@ If x2pad stored notes directly as HTML, formatting might be easier at first, but
 
 The current approach separates content from presentation. The `content` field stores what the user wrote, while the `styles` field stores how selected ranges should appear. This keeps the meaning of the note independent from how it is displayed on screen.
 
-The save process works like this:
-1. The user writes normally in the editor and may apply commands such as `//bold`, `//header`, `//color`, or `//size`.
-2. The editor stores the note content as text and tracks formatting as style ranges.
-3. When the user runs `//save`, the app removes the command text from the editor and sends the note title, content, and style ranges to the Rust/Tauri backend.
-4. The backend converts the note into the `.x2` JSON structure and writes it to the user's local device.
-5. When the user opens an existing `.x2` file through the app's file-opening interface, the app reads the selected file, validates its format and version, reloads the note content, and reapplies the saved style ranges in the editor.
+This section focuses on what is stored inside the `.x2` file. The full save and loading flow is explained later in the Architecture section.
 
 The current `.x2` file includes:
 - `format`: Identifies the file as an x2pad note file.
@@ -217,6 +212,31 @@ The current `.x2` file includes:
 - `content`: Stores the note text as a single string.
 - `styles`: Stores formatting ranges such as font size, color, bold, italic, strikethrough, and underline.
 - `savedAt`: Stores the timestamp for when the note was last saved.
+
+Example `.x2` file:
+```json
+{
+  "format": "x2pad.note",
+  "version": 1,
+  "title": "Lecture Notes",
+  "content": "Binary search halves the search space.",
+  "styles": [
+    {
+      "from": 0,
+      "to": 13,
+      "style": {
+        "fontSize": "16",
+        "textColor": "White",
+        "isBold": true,
+        "isItalic": false,
+        "isStrike": false,
+        "isUnderline": false
+      }
+    }
+  ],
+  "savedAt": "2026-06-29T02:59:00Z"
+}
+```
 
 This gives the app a working persistence layer for the current editor features. In future versions, the `.x2` format can be expanded to support richer structured blocks for tables, code boxes, AI-generated content, and additional metadata.
 
