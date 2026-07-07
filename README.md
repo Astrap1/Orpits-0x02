@@ -107,8 +107,8 @@ This makes the command system more forgiving and beginner-friendly.
 3. CodeMirror 6
 - Powers the main text editor. Standard text areas cannot support a "CLI within a Doc" experience, so CodeMirror's modular state architecture is essential for detecting specific character sequences like `//` or `\\` in real time without lagging the editor.
 
-4. Fuse.js
-- Provides lightweight fuzzy search for the command menu. This ensures that when a user triggers the command menu, the list filters instantaneously, maintaining the "flow state" of a power user.
+4. Fuse.js (planned)
+- Planned for lightweight fuzzy search in the command menu. The current command menu filters commands as the user types, while Fuse.js is intended for the later fuzzy search feature so users can still find commands even when they type imperfect abbreviations.
 
 5. CSS
 - Defines the visual design and layout of the application, including the dark editor theme, title bar, toolbar, command menu, editor container, and status bar.
@@ -135,7 +135,7 @@ This makes the command system more forgiving and beginner-friendly.
 ![main editor](<project-docs/Screenshot 2026-06-26 141027.png>)
 This screenshot shows the current x2pad editor interface, including the writing area, toolbar and overall dark theme.
 
-## Command Registry
+## Command Menu Screenshot
 ![cmd registry](<project-docs/Screenshot 2026-06-26 141128.png>)
 This screenshot shows the command menu appearing after the user types `//`. The menu helps users discover available commands without memorising shortcuts.
 
@@ -179,9 +179,28 @@ This screenshot shows the AI response ready state. The user can press `Tab` to s
     </tr>
 </table>
 
+The command registry exists so that x2pad does not need to hardcode every command directly inside the editor logic. If every command was handled with separate `if` statements or scattered event handlers, the editor would become harder to maintain as more commands are added.
+
+Instead, commands are stored as structured entries in `src/CommandRegistry.ts`. Each command can define:
+- a `name`, such as `bold`, `color`, or `wordcount`;
+- a `description`, which can be shown in the command menu;
+- optional `arguments`, such as the supported values for `//color`;
+- an `action`, which performs the command.
+
+This design makes the command system easier to extend. A basic formatting or insertion command can be added by adding a new registry entry, while the surrounding command menu and execution flow can remain mostly unchanged.
+
+For example, `//date`, `//time`, and `//wordcount` all use the same command detection and execution pathway even though they produce different output. The editor only needs to detect that a command was typed, find the matching registry entry, run its action, and remove the command text from the document.
+
+The registry also improves discoverability. Since every command has a description, the same data structure that powers command execution can also power the command menu. This avoids duplicating command names and descriptions in separate parts of the codebase.
+
+Using a registry also prepares x2pad for more advanced commands later. Commands such as `//table`, `//code`, or formula commands can follow the same overall pattern while still having custom behaviour where needed.
+
 # .x2 Note Format
 The `.x2` file format is the local-first storage format used by x2pad. It allows notes to be saved directly to the user's device while preserving the note text and the formatting ranges applied through the editor.
 
+This section focuses on what is stored inside the `.x2` file. The full save and loading flow is explained later in the Architecture section.
+
+## Why JSON
 For the current version, `.x2` files are stored as JSON. We chose JSON because it is readable, easy to debug, and simple to parse from both the React frontend and the Rust/Tauri backend. During development, this is useful because the team can open a saved `.x2` file and immediately inspect whether the title, content, style ranges, and timestamp were saved correctly.
 
 JSON also fits the current complexity of the project. x2pad does not need a binary file format because the current note data is mostly structured text and metadata. A binary format may be smaller, but it would be harder to inspect and harder to debug. JSON gives us a practical balance: it is structured enough for the app to validate and extend, but still simple enough for developers to understand without special tools.
@@ -203,8 +222,20 @@ If x2pad stored notes directly as HTML, formatting might be easier at first, but
 
 The current approach separates content from presentation. The `content` field stores what the user wrote, while the `styles` field stores how selected ranges should appear. This keeps the meaning of the note independent from how it is displayed on screen.
 
-This section focuses on what is stored inside the `.x2` file. The full save and loading flow is explained later in the Architecture section.
+## Why Local Files Instead of a Database for Notes
+x2pad uses local `.x2` files instead of storing normal notes in a database. This was a deliberate design choice based on the target users, the privacy-focused user story, and the current scope of the project.
 
+For normal note-taking, local files are a better fit because:
+- users keep direct ownership of their notes;
+- the app can work without account creation;
+- the app can work without cloud infrastructure;
+- each note can be backed up, copied, moved, or shared like a normal file;
+- the file remains inspectable because it is stored as readable JSON;
+- the team can focus on the editor workflow instead of building account, server, and database infrastructure too early.
+
+A database can be useful when an app needs features such as complex indexing, multi-device sync, collaboration, or usage tracking. However, those are separate concerns from saving a normal local note. For the current note format, a self-contained `.x2` file is simpler and matches the product goal better: a lightweight desktop editor where users own their files.
+
+## Current `.x2` Structure
 The current `.x2` file includes:
 - `format`: Identifies the file as an x2pad note file.
 - `version`: Tracks the file format version so future versions can remain compatible.
@@ -213,7 +244,7 @@ The current `.x2` file includes:
 - `styles`: Stores formatting ranges such as font size, color, bold, italic, strikethrough, and underline.
 - `savedAt`: Stores the timestamp for when the note was last saved.
 
-Example `.x2` file:
+## Example `.x2` File
 ```json
 {
   "format": "x2pad.note",
@@ -249,7 +280,7 @@ The frontend layer is responsible for the user interface, editor behaviour, comm
 This separation allows x2pad to feel like a modern web-based editor while still having access to native desktop features.
 
 ## 1. Frontend Responsibilities
-The frontend is built using React, TypeScript, CodeMirror 6, Fuse.js, and CSS. It is responsible for everything the user directly interacts with inside the editor.
+The frontend is built using React, TypeScript, CodeMirror 6, and CSS. Fuse.js is planned for the later fuzzy search feature. The frontend is responsible for everything the user directly interacts with inside the editor.
 
 The frontend handles:
 - Rendering the main editor interface
@@ -460,19 +491,9 @@ Current examples include:
 This is useful because x2pad is expected to grow. Future features such as `//table`, `//code`, formulas, and fuzzy command search would become difficult to maintain if all logic was placed in one large file. By separating features into clearer modules, future changes can be made with less risk of accidentally breaking unrelated behaviour.
 
 ## 3. Central Command Registry
-One of the clearest examples of maintainable design in x2pad is the central command registry in `src/CommandRegistry.ts`.
+The command registry is explained in more detail in the Command Registry section. From a software engineering perspective, it is important because it keeps command definitions in one central place instead of scattering command logic throughout the editor.
 
-Instead of hardcoding every command directly inside the editor event loop, commands are represented as structured objects. Each command has:
-- a `name`, such as `bold`, `color`, or `wordcount`;
-- a `description`, which can be displayed in the command menu;
-- optional `arguments`, such as the supported values for `//color`;
-- an `action`, which performs the command.
-
-This design follows the open-closed principle. The editor does not need to be rewritten every time a basic formatting command is added. A new command can be added by adding a new entry to the registry, while the surrounding command menu and execution flow can remain mostly unchanged.
-
-For example, the `//date`, `//time`, and `//wordcount` commands all share the same command execution pathway, even though they produce different results. The editor only needs to detect the command and pass control to the registered action.
-
-This design also improves discoverability. Because each command includes a description, the same data structure that powers command execution can also power the command menu. This avoids duplicating command names and descriptions in separate parts of the codebase.
+This supports maintainability and the open-closed principle. The editor's command detection flow can stay stable while individual commands are added, updated, or removed through `src/CommandRegistry.ts`.
 
 ## 4. Type-Safe Command Actions
 The command registry uses TypeScript interfaces to describe what a command is allowed to do. The `CommandActionContext` interface defines the functions that a command can call, such as:
@@ -509,13 +530,9 @@ This prevents the app from blindly trusting arbitrary files. If a user accidenta
 Defensive programming is important for x2pad because commands are typed directly into the document. The app must be forgiving when the user types incomplete commands, invalid commands, or command-like text that should not be executed.
 
 ## 6. Local-First Data Ownership
-x2pad uses local `.x2` files instead of storing notes in a remote database. This was a deliberate design choice based on the target users and the privacy-focused user story.
+The `.x2` section explains the local-file storage decision in more detail. From a software engineering perspective, this is evidence of local-first design: normal notes are stored as self-contained files on the user's device instead of depending on a remote database.
 
-For the current project scope, local files are better than a database because:
-- users keep direct ownership of their notes
-- the app can work without account creation
-- the app can work without cloud infrastructure
-- notes can be backed up, copied, or shared like normal files
+This supports user ownership and keeps the core note-taking workflow independent from accounts, servers, and cloud infrastructure.
 
 ## 7. Versioned `.x2` File Format
 The `.x2` format includes both a `format` field and a `version` field. This is an important maintainability decision.
