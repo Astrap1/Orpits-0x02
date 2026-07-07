@@ -182,7 +182,26 @@ This screenshot shows the AI response ready state. The user can press `Tab` to s
 # .x2 Note Format
 The `.x2` file format is the local-first storage format used by x2pad. It allows notes to be saved directly to the user's device while preserving the note text and the formatting ranges applied through the editor.
 
-For the current version, `.x2` files are stored as JSON. This makes the format readable, easy to debug, and simple to parse from both the React frontend and the Rust/Tauri backend.
+For the current version, `.x2` files are stored as JSON. We chose JSON because it is readable, easy to debug, and simple to parse from both the React frontend and the Rust/Tauri backend. During development, this is useful because the team can open a saved `.x2` file and immediately inspect whether the title, content, style ranges, and timestamp were saved correctly.
+
+JSON also fits the current complexity of the project. x2pad does not need a binary file format because the current note data is mostly structured text and metadata. A binary format may be smaller, but it would be harder to inspect and harder to debug. JSON gives us a practical balance: it is structured enough for the app to validate and extend, but still simple enough for developers to understand without special tools.
+
+Another reason for choosing JSON is compatibility with the frontend and backend stack. The editor state already exists in TypeScript as objects such as the note title, content, and style ranges. The Rust backend can serialise and deserialise the same structure using `serde`. This reduces unnecessary conversion work between the frontend and backend.
+
+## Why `.x2` Stores Plain Text Plus Style Ranges
+x2pad stores the main note content as plain text and stores formatting separately as style ranges. This is a deliberate alternative to storing the whole note as HTML.
+
+Using plain text plus style ranges has several benefits:
+- the note content remains easy to read and process;
+- commands can operate on text without needing to parse HTML;
+- saving and loading is easier to debug;
+- style information can be reapplied by CodeMirror decorations;
+- PDF export can transform the same style ranges into styled PDF text;
+- future export systems can decide how to represent the styles.
+
+If x2pad stored notes directly as HTML, formatting might be easier at first, but the data format would become more tightly coupled to the current UI representation. It would also make features like command parsing, code boxes, and table formulas harder to manage cleanly because the app would need to work around HTML tags mixed into the note content.
+
+The current approach separates content from presentation. The `content` field stores what the user wrote, while the `styles` field stores how selected ranges should appear. This keeps the meaning of the note independent from how it is displayed on screen.
 
 The save process works like this:
 1. The user writes normally in the editor and may apply commands such as `//bold`, `//header`, `//color`, or `//size`.
@@ -299,7 +318,63 @@ x2pad can send the prompt together with the current note context to the Gemini A
 
 In future versions, the AI flow can be improved with loading states, streamed responses, error handling, and options for where the AI response should be inserted. For privacy, the app should also make it clear when text or document context is being sent to an external AI service.
 
-## 6. Why This Architecture Fits x2pad
+## 6. How PDF Export Works
+PDF export is handled through the Rust/Tauri backend because PDF generation is closer to a desktop file operation than a normal frontend rendering task. The frontend already knows the current note title, text content, and style ranges, but the backend is better suited for creating and writing the final PDF file to the user's device.
+
+The PDF export flow works like this:
+1. The user runs `//export`.
+2. The frontend recognises the export command and collects the note title, content, and style ranges.
+3. The user chooses where to save the PDF file.
+4. The frontend sends the note data and output path to the Rust/Tauri backend.
+5. The backend creates a PDF document using `printpdf`.
+6. The backend converts the note content into styled text segments using the saved style ranges.
+7. The backend wraps long lines so they fit within the PDF page width.
+8. The backend writes styled text to the PDF, including font size, colour, bold, italic, underline, and strikethrough where supported.
+9. If the note exceeds one page, the backend creates additional pages.
+10. The PDF is written to the selected file path.
+
+This flow shows why x2pad separates editor state from export logic. The editor stores the note in a format that is useful while writing, while the backend transforms that same data into a document format that is useful for sharing or submission.
+
+## 7. How Sidebar and Folder Loading Works
+x2pad also includes a sidebar that behaves like a lightweight local note browser. Instead of opening a single isolated file each time, the app can remember a notes folder and load `.x2` files from that folder into the sidebar.
+
+The folder loading flow works like this:
+1. When the app starts, the backend checks whether a notes folder has already been configured.
+2. If a folder has not been configured, the app asks the user to choose one.
+3. The selected folder path is saved in the app configuration directory.
+4. The backend reads the folder and filters for files with the `.x2` extension.
+5. Each `.x2` file is parsed and validated before being shown in the sidebar.
+6. The frontend receives the loaded notes and displays them as selectable items.
+7. When the user selects a note, the editor loads that note's content and reapplies its style ranges.
+
+This design supports the local-first model of x2pad. Notes remain normal files on the user's device, but the app still provides a smoother workspace experience by remembering the folder and listing available notes automatically.
+
+The sidebar also has its own interaction state, such as the current search value, selected sidebar item, active note path, and whether the logo/search pane is being shown. This keeps note navigation separate from the actual editor content.
+
+## 8. State Management Explanation
+x2pad has several different kinds of state, and they are handled in different places depending on what the state represents.
+
+React state is used for interface-level information such as:
+- the current editor value;
+- the selected note title and active note path;
+- command menu visibility and command search query;
+- current formatting controls such as font size, colour, bold, italic, underline, and strikethrough;
+- AI session status, response text, and insertion placement;
+- sidebar search and selection state.
+
+CodeMirror state is used for editor-specific behaviour such as:
+- document changes;
+- cursor position;
+- keyboard handling;
+- command-line highlighting;
+- AI command highlighting;
+- text style decorations.
+
+Refs are used for values that need to persist across renders without always causing a full React re-render. For example, style ranges are tracked in refs so the editor can update formatting ranges as text changes, while still allowing those ranges to be saved into the `.x2` file later.
+
+This split is important because x2pad is not just displaying plain text. It has to handle typed commands, formatting ranges, AI insertion, saved style restoration, and sidebar navigation at the same time. Keeping these responsibilities in the correct state layer helps the editor remain responsive and reduces the chance that one interaction accidentally breaks another.
+
+## 9. Why This Architecture Fits x2pad
 This architecture fits x2pad because the app needs both a flexible editor interface and native desktop capabilities.
 
 The frontend is responsible for delivering a smooth writing experience, while the Rust/Tauri backend handles operations that require access to the local system. This separation keeps the editor responsive while still allowing features such as local file saving, exporting, and future code execution.
@@ -340,12 +415,138 @@ The command menu also filters available commands as the user types, making the k
 We also worked on the first usable version of the AI engine, using the `\\` command.
 
 # Software Engineering Evidence
-1. Modular frontend structure
-- The project separates pages, components, styles, and command logic into different files. This makes the editor easier to maintain as more features are added.
-2. Central command registry
-- Keyboard commands are stored in `src/CommandRegistry.ts` instead of being hardcoded throughout the editor. This makes it easier to add, test, and update commands such as `//table`, `//code`, and future AI prompts.
-3. Incremental feature delivery
-- The project is split into milestones and features. We are building the editor foundation first, then adding commands, AI, code boxes, tables, and fuzzy search in later stages.
+This section explains the software engineering principles that were applied while building x2pad. Instead of only listing features, it shows how the project was structured, why certain design decisions were made, and how the implementation choices support maintainability, reliability, extensibility, and user experience.
+
+## 1. Separation of Concerns
+x2pad is split into a frontend editor layer and a backend desktop layer. This is one of the most important software engineering decisions in the project because the app needs both a smooth writing interface and access to native operating system features.
+
+Since the frontend and backend responsibilities were already explained in the architecture section, the important software engineering point here is why the split matters. The frontend focuses on the user's editing experience, while the backend handles operations that require native desktop access. This prevents the editor interface from becoming mixed together with file-system logic, PDF writing, and operating-system configuration.
+
+This separation also prevents the backend from needing to understand React UI state. Each side has a clearer responsibility, which makes the code easier to reason about and easier to extend.
+
+For example, saving a note is not handled entirely inside the React editor. The frontend collects the note data, then calls the backend command `save_x2_note`. The backend then serialises the data and writes the file. This keeps the user interface responsive while also keeping file-system operations inside the layer that is designed to handle them.
+
+## 2. Modular Frontend Structure
+The frontend is organised into separate files for pages, components, styles, and command logic. This supports modularity because each file has a more focused purpose.
+
+Current examples include:
+- `src/pages/Editor.tsx`: contains the main editor workflow, editor state, command detection, note loading, AI interaction, and CodeMirror setup.
+- `src/pages/StartPage.tsx`: contains the starting page of the app.
+- `src/components/ItemsList.tsx` and `src/components/ItemRow.tsx`: separate reusable UI pieces from the page-level logic.
+- `src/CommandRegistry.ts`: stores command definitions separately from the editor page.
+- `src/styles/Editor.css` and `src/styles/StartPage.css`: separate styling from component logic.
+- `src-tauri/src/lib.rs`: contains native commands for persistence, PDF export, folder loading, and settings storage.
+
+This is useful because x2pad is expected to grow. Future features such as `//table`, `//code`, formulas, and fuzzy command search would become difficult to maintain if all logic was placed in one large file. By separating features into clearer modules, future changes can be made with less risk of accidentally breaking unrelated behaviour.
+
+## 3. Central Command Registry
+One of the clearest examples of maintainable design in x2pad is the central command registry in `src/CommandRegistry.ts`.
+
+Instead of hardcoding every command directly inside the editor event loop, commands are represented as structured objects. Each command has:
+- a `name`, such as `bold`, `color`, or `wordcount`;
+- a `description`, which can be displayed in the command menu;
+- optional `arguments`, such as the supported values for `//color`;
+- an `action`, which performs the command.
+
+This design follows the open-closed principle. The editor does not need to be rewritten every time a basic formatting command is added. A new command can be added by adding a new entry to the registry, while the surrounding command menu and execution flow can remain mostly unchanged.
+
+For example, the `//date`, `//time`, and `//wordcount` commands all share the same command execution pathway, even though they produce different results. The editor only needs to detect the command and pass control to the registered action.
+
+This design also improves discoverability. Because each command includes a description, the same data structure that powers command execution can also power the command menu. This avoids duplicating command names and descriptions in separate parts of the codebase.
+
+## 4. Type-Safe Command Actions
+The command registry uses TypeScript interfaces to describe what a command is allowed to do. The `CommandActionContext` interface defines the functions that a command can call, such as:
+- `insertText`
+- `setFontSize`
+- `setSelectedFont`
+- `setTextColor`
+- `setBold`
+- `setItalic`
+- `setStrike`
+- `setUnderline`
+- `getDocumentText`
+
+This is an example of information hiding. Commands do not need direct access to the entire editor implementation. They receive a controlled context containing only the operations they need.
+
+This reduces coupling between the command registry and the editor page. For example, `//wordcount` does not need to know how CodeMirror stores text internally. It only calls `getDocumentText()` and inserts the result through `insertText()`.
+
+This design is safer than allowing commands to directly modify arbitrary editor state. It makes each command easier to test mentally, easier to review, and easier to replace later.
+
+## 5. Defensive Programming and Input Validation
+x2pad applies defensive programming in several areas where user input or file input could be invalid.
+
+For command arguments, `//size` checks that the provided size is numeric, finite, and greater than zero before applying it. This prevents invalid values such as `//size abc`, `//size -5`, or an empty argument from corrupting the editor state.
+
+For colour commands, `//color` only accepts supported colour aliases from `TEXT_COLOR_OPTIONS`. If a user types an unsupported colour, the command returns `false` instead of applying an unknown value.
+
+For file loading, the Rust backend checks that:
+- the file has the `.x2` extension;
+- the parsed JSON has the expected `format` value;
+- the file version matches the version supported by the app.
+
+This prevents the app from blindly trusting arbitrary files. If a user accidentally opens the wrong file, the app can reject it cleanly instead of crashing or loading corrupted data.
+
+Defensive programming is important for x2pad because commands are typed directly into the document. The app must be forgiving when the user types incomplete commands, invalid commands, or command-like text that should not be executed.
+
+## 6. Local-First Data Ownership
+x2pad uses local `.x2` files instead of storing notes in a remote database. This was a deliberate design choice based on the target users and the privacy-focused user story.
+
+For the current project scope, local files are better than a database because:
+- users keep direct ownership of their notes
+- the app can work without account creation
+- the app can work without cloud infrastructure
+- notes can be backed up, copied, or shared like normal files
+
+## 7. Versioned `.x2` File Format
+The `.x2` format includes both a `format` field and a `version` field. This is an important maintainability decision.
+
+The `format` field identifies the file as an x2pad note file. This allows the app to distinguish a valid x2pad note from a random JSON file.
+
+The `version` field allows the file format to evolve. For example, the current version stores:
+- title
+- content
+- style ranges
+- saved timestamp
+
+Future versions may need to store:
+- tables
+- code boxes
+- formula cells
+- AI response metadata
+- embedded command history
+- richer block structures
+
+By including a version number now, the app can later introduce migration logic instead of breaking old notes. This is an example of designing for future compatibility without overbuilding the current implementation.
+
+## 8. Controlled State Management in the Editor
+The architecture section explains the different state layers in more detail. From a software engineering perspective, the important point is that x2pad does not treat all state as one large object.
+
+React state is used for interface-level behaviour, CodeMirror state is used for editor-specific behaviour, and refs are used for values that need to persist across renders without constantly updating the interface. This separation keeps the editor more predictable because command detection, formatting, AI insertion, note selection, and style restoration do not all compete for the same state mechanism.
+
+## 9. Backend Validation and Error Handling
+The Rust backend returns `Result<..., String>` from Tauri commands. This allows backend failures to be reported to the frontend instead of causing uncontrolled crashes.
+
+Examples include:
+- `save_x2_note` returns an error if the `.x2` file cannot be prepared or written.
+- `load_x2_note_from_path` returns an error if the file is not a valid `.x2` note.
+- `set_note_folder` returns an error if the selected path is not a directory.
+- `export_note_pdf` returns an error if the PDF cannot be created or written.
+
+This supports reliability because file system operations can fail for many reasons, such as missing permissions, deleted folders, invalid files, or corrupted settings. Instead of assuming everything succeeds, the backend reports failures through a controlled interface.
+
+## 10. User-Centred Engineering
+The main interaction model was designed around the user's typing flow. This is not only a UI decision, but also an engineering decision.
+
+The command system avoids forcing users to memorise many shortcuts. Instead, users can type commands in natural text form and use the command menu for guidance.
+
+The AI registry also follows the same principle. Rather than opening a separate chatbot window, the user can type `\\` inside the note, receive a response, and choose where to insert it.
+
+This consistency matters because the app's features share a common interaction language. Formatting, saving, exporting, and AI assistance all feel like part of the same editor instead of separate tools bolted together.
+
+## 11. Privacy-Conscious Design
+x2pad stores notes locally and does not require a user account for normal note-taking. This supports the privacy-conscious user story directly.
+
+By saving normal notes as local `.x2` files, the app gives users direct control over where their writing is stored. This is important for users who may be taking personal notes, lecture notes, project notes, or drafts that they do not want locked inside a cloud-only platform.
 
 # Next Milestone Objectives
 For the next milestone, we plan to implement the `//code` and `//table` features.
