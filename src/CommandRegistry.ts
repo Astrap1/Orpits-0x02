@@ -200,6 +200,11 @@ export const CommandRegistry: Command[] = [
     action: insertWordCount
   },
   {
+    name: "code",
+    description: "Insert a Python code box",
+    action: handledByEditor
+  },
+  {
     name: "save",
     description: "Save the current .x2 note",
     action: handledByEditor

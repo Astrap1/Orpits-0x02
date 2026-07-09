@@ -99,6 +99,35 @@ interface LoadedX2Folder {
   activePath: string;
 }
 
+interface PythonCodeBlock {
+  code: string;
+  blockFrom: number;
+  blockTo: number;
+  from: number;
+  to: number;
+}
+
+interface CodeRunResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+}
+
+interface CodeRunState {
+  status: "idle" | "running" | "success" | "error";
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  message: string;
+}
+
+type CodeRunAction = "run" | "clear";
+
+const CODE_RUN_ACTIONS: { mode: CodeRunAction; label: string }[] = [
+  { mode: "run", label: "Run Python" },
+  { mode: "clear", label: "Clear output" }
+];
+
 interface PendingStyleRestore {
   content: string;
   styles: TextStyleRange[];
@@ -568,6 +597,70 @@ function getAiCommandAtCursor(view: EditorView) {
   };
 }
 
+function getPythonCodeBlockNearCursor(view: EditorView): PythonCodeBlock | null {
+  const documentText = view.state.doc.toString();
+  const cursor = view.state.selection.main.head;
+  const fencePattern = /```python\s*\n([\s\S]*?)\n```/gi;
+  let nearestBlock: PythonCodeBlock | null = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (const match of documentText.matchAll(fencePattern)) {
+    const blockFrom = match.index ?? 0;
+    const fullText = match[0] ?? "";
+    const code = match[1] ?? "";
+    const codeFrom = blockFrom + fullText.indexOf(code);
+    const codeTo = codeFrom + code.length;
+    const blockTo = blockFrom + fullText.length;
+    const cursorIsInsideBlock = blockFrom <= cursor && cursor <= blockTo;
+
+    if (cursorIsInsideBlock) {
+      return {
+        code,
+        blockFrom,
+        blockTo,
+        from: codeFrom,
+        to: codeTo
+      };
+    }
+
+    const distance = cursor < blockFrom ? blockFrom - cursor : cursor - blockTo;
+
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestBlock = {
+        code,
+        blockFrom,
+        blockTo,
+        from: codeFrom,
+        to: codeTo
+      };
+    }
+  }
+
+  return nearestBlock;
+}
+
+function isCursorAtPythonCodeBlockEnd(view: EditorView) {
+  const selection = view.state.selection.main;
+
+  if (!selection.empty) {
+    return false;
+  }
+
+  const codeBlock = getPythonCodeBlockNearCursor(view);
+
+  if (!codeBlock || selection.head < codeBlock.to || selection.head > codeBlock.blockTo) {
+    return false;
+  }
+
+  const line = view.state.doc.lineAt(selection.head);
+  const cursorOffset = selection.head - line.from;
+  const textBeforeCursor = line.text.slice(0, cursorOffset).trim();
+  const textAfterCursor = line.text.slice(cursorOffset).trim();
+
+  return textBeforeCursor === "```" && textAfterCursor === "";
+}
+
 function getSafeFileName(title: string, extension: "x2" | "pdf") {
   const baseName = title
     .trim()
@@ -1017,6 +1110,15 @@ function Editor() {
   const [apiKeyStatus, setApiKeyStatus] = useState("");
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
   const [aiSession, setAiSession] = useState<AiSession | null>(null);
+  const [codeRun, setCodeRun] = useState<CodeRunState>({
+    status: "idle",
+    stdout: "",
+    stderr: "",
+    exitCode: null,
+    message: "Place your cursor inside a Python code block."
+  });
+  const [showCodeRunner, setShowCodeRunner] = useState(false);
+  const [codeRunActionIndex, setCodeRunActionIndex] = useState(0);
 
   const [selectedFont, setSelectedFont] = useState("Body");
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
@@ -1426,6 +1528,122 @@ function Editor() {
     void runFileCommand("new", value, activeNoteTitle, openedNotePath, currentStyles);
   }, [activeNoteTitle, openedNotePath, runFileCommand, value]);
 
+  const runPythonBlockNearCursor = useCallback(async () => {
+    const editorView = editorViewRef.current;
+    setShowCodeRunner(true);
+    setCodeRunActionIndex(0);
+
+    if (!editorView) {
+      setCodeRun({
+        status: "error",
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        message: "Open a note before running Python."
+      });
+      return;
+    }
+
+    const codeBlock = getPythonCodeBlockNearCursor(editorView);
+
+    if (!codeBlock) {
+      setCodeRun({
+        status: "error",
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        message: "Place your cursor inside a Python code block first."
+      });
+      editorView.focus();
+      return;
+    }
+
+    if (!("__TAURI_INTERNALS__" in window)) {
+      setCodeRun({
+        status: "error",
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        message: "Running Python requires the desktop app."
+      });
+      editorView.focus();
+      return;
+    }
+
+    setCodeRun({
+      status: "running",
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      message: "Running Python..."
+    });
+
+    try {
+      const result = await invoke<CodeRunResult>("run_python_snippet", {
+        code: codeBlock.code
+      });
+      const hasError = !!result.stderr.trim() || (result.exitCode !== null && result.exitCode !== 0);
+
+      setCodeRun({
+        status: hasError ? "error" : "success",
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        message: hasError ? "Python finished with errors." : "Python finished."
+      });
+    } catch (error) {
+      setCodeRun({
+        status: "error",
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        message: String(error)
+      });
+    } finally {
+      editorView.focus();
+    }
+  }, []);
+
+  const clearCodeRunOutput = useCallback(() => {
+    setShowCodeRunner(true);
+    setCodeRun({
+      status: "idle",
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      message: "Output cleared. Place your cursor inside a Python code block."
+    });
+    editorViewRef.current?.focus();
+    return true;
+  }, []);
+
+  const cycleCodeRunAction = useCallback(() => {
+    setShowCodeRunner(true);
+    setCodeRunActionIndex((currentIndex) => (currentIndex + 1) % CODE_RUN_ACTIONS.length);
+    return true;
+  }, []);
+
+  const acceptCodeRunAction = useCallback(() => {
+    if (codeRun.status === "running") {
+      return true;
+    }
+
+    const action = CODE_RUN_ACTIONS[codeRunActionIndex]?.mode;
+
+    if (action === "clear") {
+      return clearCodeRunOutput();
+    }
+
+    void runPythonBlockNearCursor();
+    return true;
+  }, [clearCodeRunOutput, codeRun.status, codeRunActionIndex, runPythonBlockNearCursor]);
+
+  const hideCodeRunner = useCallback(() => {
+    setShowCodeRunner(false);
+    editorViewRef.current?.focus();
+    return true;
+  }, []);
+
   const runAiCommandAtCursor = useCallback((view: EditorView) => {
     const pendingAiCommand = getAiCommandAtCursor(view);
 
@@ -1633,6 +1851,33 @@ function Editor() {
       pendingCommand.to
     );
 
+    if (commandName === "code") {
+      const codeTemplate = "```python\nprint(\"Hello from x2pad\")\n```";
+      const cursorAnchor = pendingCommand.from + "```python\nprint(\"Hello from x2pad\")".length;
+
+      view.dispatch({
+        changes: {
+          from: pendingCommand.from,
+          to: pendingCommand.to,
+          insert: codeTemplate
+        },
+        selection: { anchor: cursorAnchor },
+        scrollIntoView: true
+      });
+      setShowCommands(false);
+      setCommandQuery("");
+      setShowCodeRunner(true);
+      setCodeRunActionIndex(0);
+      setCodeRun({
+        status: "idle",
+        stdout: "",
+        stderr: "",
+        exitCode: null,
+        message: "Python code box inserted. Edit it, then run it."
+      });
+      return true;
+    }
+
     if (commandName === "save" || commandName === "new" || commandName === "open" || commandName === "export") {
       view.dispatch({
         changes: {
@@ -1691,15 +1936,15 @@ function Editor() {
     Prec.highest(keymap.of([
       {
         key: "Enter",
-        run: (view) => acceptAiSession(view) || runAiCommandAtCursor(view) || runCommandAtCursor(view) || continueListAtCursor(view)
+        run: (view) => acceptAiSession(view) || (showCodeRunner && isCursorAtPythonCodeBlockEnd(view) ? acceptCodeRunAction() : false) || runAiCommandAtCursor(view) || runCommandAtCursor(view) || continueListAtCursor(view)
       },
       {
         key: "Tab",
-        run: () => aiSession?.status === "ready" ? cycleAiPlacement() : false
+        run: () => aiSession?.status === "ready" ? cycleAiPlacement() : showCodeRunner ? cycleCodeRunAction() : false
       },
       {
         key: "Escape",
-        run: () => aiSession ? cancelAiSession() : false
+        run: () => aiSession ? cancelAiSession() : showCodeRunner ? hideCodeRunner() : false
       },
       {
         key: "Backspace",
@@ -1800,10 +2045,14 @@ function Editor() {
     isUnderline,
     acceptAiSession,
     aiSession,
+    acceptCodeRunAction,
     cancelAiSession,
+    cycleCodeRunAction,
     cycleAiPlacement,
+    hideCodeRunner,
     runAiCommandAtCursor,
-    runCommandAtCursor
+    runCommandAtCursor,
+    showCodeRunner
   ]);
 
   const onChange = useCallback((val: string, viewUpdate: any) => {
@@ -1848,6 +2097,7 @@ function Editor() {
   const activeAiPlacement = aiSession?.status === "ready"
     ? aiSession.placements[aiSession.placementIndex]
     : null;
+  const activeCodeRunAction = CODE_RUN_ACTIONS[codeRunActionIndex] ?? CODE_RUN_ACTIONS[0];
 
   const handleSidebarKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (!["ArrowUp", "ArrowDown", "Home", "End", "Enter"].includes(event.key)) {
@@ -2004,6 +2254,13 @@ function Editor() {
 
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (showCodeRunner && event.key === "Tab" && !aiSession) {
+        event.preventDefault();
+        event.stopPropagation();
+        cycleCodeRunAction();
+        return;
+      }
+
       if (aiSession?.status === "ready" && event.key === "Enter") {
         const editorView = editorViewRef.current;
 
@@ -2020,6 +2277,16 @@ function Editor() {
         return;
       }
 
+      if (showCodeRunner && event.key === "Enter") {
+        const editorView = editorViewRef.current;
+
+        if (editorView && document.activeElement !== editorView.contentDOM) {
+          event.preventDefault();
+          acceptCodeRunAction();
+          return;
+        }
+      }
+
       if (event.key !== "Escape") {
         return;
       }
@@ -2027,6 +2294,12 @@ function Editor() {
       if (aiSession) {
         event.preventDefault();
         cancelAiSession();
+        return;
+      }
+
+      if (showCodeRunner) {
+        event.preventDefault();
+        hideCodeRunner();
         return;
       }
 
@@ -2046,9 +2319,9 @@ function Editor() {
       }
     };
 
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [acceptAiSession, aiSession, cancelAiSession, cycleAiPlacement, focusSidebarOnActiveNote, showCommands]);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [acceptAiSession, acceptCodeRunAction, aiSession, cancelAiSession, cycleAiPlacement, cycleCodeRunAction, focusSidebarOnActiveNote, hideCodeRunner, showCodeRunner, showCommands]);
 
   return (
     <div className="editor-shell">
@@ -2142,6 +2415,19 @@ function Editor() {
             </a>
             <div className="style-status">
               <span className={`file-status ${fileStatusKind}`}>{fileStatus}</span>
+              {!showLogoPane && (
+                <button
+                  type="button"
+                  className="run-code-button"
+                  onClick={() => {
+                    setShowCodeRunner(true);
+                    setCodeRunActionIndex(0);
+                  }}
+                  disabled={codeRun.status === "running"}
+                >
+                  {codeRun.status === "running" ? "Running..." : "Code runner"}
+                </button>
+              )}
               <span>{styleIndicator}</span>
               <span className="saved-dot" aria-label="Saved" />
             </div>
@@ -2215,6 +2501,51 @@ function Editor() {
                     {aiSession.status === "ready" ? "Enter accept  Tab move  Esc cancel" : "Esc cancel"}
                   </div>
                 </div>
+              </div>
+            )}
+
+            {!showLogoPane && showCodeRunner && (
+              <div className={`code-run-panel ${codeRun.status}`} role="status" aria-live="polite">
+                <div className="code-run-header">
+                  <span>Code runner</span>
+                  <span>
+                    {codeRun.exitCode === null ? codeRun.status : `exit ${codeRun.exitCode}`}
+                  </span>
+                </div>
+                <div className="code-run-actions" aria-label="Code runner actions">
+                  {CODE_RUN_ACTIONS.map((action, index) => (
+                    <button
+                      type="button"
+                      key={action.mode}
+                      className={index === codeRunActionIndex ? "active" : ""}
+                      onClick={() => {
+                        setCodeRunActionIndex(index);
+                        if (action.mode === "clear") {
+                          clearCodeRunOutput();
+                        } else {
+                          void runPythonBlockNearCursor();
+                        }
+                      }}
+                      disabled={codeRun.status === "running"}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="code-run-message">{codeRun.message}</div>
+                <div className="code-run-keys">
+                  Enter {activeCodeRunAction.label}  Tab move  Esc hide
+                </div>
+                {(codeRun.stdout || codeRun.stderr) && (
+                  <div className="code-run-output">
+                    {codeRun.stdout && (
+                      <pre>{codeRun.stdout}</pre>
+                    )}
+                    {codeRun.stderr && (
+                      <pre className="code-run-stderr">{codeRun.stderr}</pre>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </section>

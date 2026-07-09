@@ -3,8 +3,11 @@ use printpdf::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 const X2_FORMAT: &str = "x2pad.note";
@@ -20,6 +23,7 @@ const PDF_DEFAULT_TEXT_COLOR: &str = "Black";
 const PDF_POINT_TO_MM: f32 = 0.352_778;
 const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
 const NOTE_FOLDER_SETTINGS_FILE: &str = "note-folder-settings.json";
+const PYTHON_SNIPPET_TIMEOUT_SECONDS: u64 = 5;
 
 #[derive(Deserialize)]
 struct NotePayload {
@@ -115,6 +119,14 @@ struct LoadedX2Folder {
     notes: Vec<LoadedX2Note>,
     #[serde(rename = "activePath")]
     active_path: String,
+}
+
+#[derive(Serialize)]
+struct CodeRunResult {
+    stdout: String,
+    stderr: String,
+    #[serde(rename = "exitCode")]
+    exit_code: Option<i32>,
 }
 
 #[derive(Clone)]
@@ -278,6 +290,81 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
     document
         .save(&mut BufWriter::new(output))
         .map_err(|error| format!("Could not write PDF file: {error}"))
+}
+
+#[tauri::command]
+fn run_python_snippet(code: String) -> Result<CodeRunResult, String> {
+    if code.trim().is_empty() {
+        return Err("Python code block is empty.".to_string());
+    }
+
+    run_python_with_command("py", &["-3", "-"], &code)
+        .or_else(|_| run_python_with_command("python", &["-"], &code))
+        .map_err(|error| {
+            format!(
+                "{error} Make sure Python is installed and available as 'py -3' or 'python'."
+            )
+        })
+}
+
+fn run_python_with_command(
+    program: &str,
+    args: &[&str],
+    code: &str,
+) -> Result<CodeRunResult, String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not start {program}: {error}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(code.as_bytes())
+            .map_err(|error| format!("Could not send code to Python: {error}"))?;
+    }
+
+    let started_at = Instant::now();
+
+    loop {
+        if let Some(_status) = child
+            .try_wait()
+            .map_err(|error| format!("Could not check Python process: {error}"))?
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("Could not read Python output: {error}"))?;
+
+            return Ok(CodeRunResult {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code(),
+            });
+        }
+
+        if started_at.elapsed() >= Duration::from_secs(PYTHON_SNIPPET_TIMEOUT_SECONDS) {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("Could not stop Python process: {error}"))?;
+            let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str("Python snippet timed out after 5 seconds.");
+
+            return Ok(CodeRunResult {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr,
+                exit_code: None,
+            });
+        }
+
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[tauri::command]
@@ -833,6 +920,7 @@ pub fn run() {
             load_startup_x2_folder,
             get_default_note_folder,
             export_note_pdf,
+            run_python_snippet,
             has_gemini_api_key,
             get_gemini_api_key,
             save_gemini_api_key
