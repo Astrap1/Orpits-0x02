@@ -346,10 +346,12 @@ function findAiMarkdownClosingDelimiter(text: string, from: number, delimiter: s
 }
 
 function getAiMarkdownStyle(delimiter: string): ActiveTextStyle {
+  const isDoubleDelimiter = delimiter.length === 2;
+
   return {
     ...defaultTextStyle,
-    isBold: delimiter !== "_",
-    isItalic: delimiter === "_"
+    isBold: isDoubleDelimiter,
+    isItalic: !isDoubleDelimiter
   };
 }
 

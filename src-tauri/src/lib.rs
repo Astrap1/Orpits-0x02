@@ -613,8 +613,9 @@ fn build_styled_pdf_lines(content: &str, styles: &[TextStyleRange]) -> Vec<Vec<S
     let mut current_line = Vec::new();
     let mut current_text = String::new();
     let mut current_style = TextStyle::default();
+    let mut code_unit_index = 0;
 
-    for (byte_index, character) in content.char_indices() {
+    for character in content.chars() {
         if character == '\n' {
             if !current_text.is_empty() {
                 current_line.push(StyledTextSegment {
@@ -623,10 +624,11 @@ fn build_styled_pdf_lines(content: &str, styles: &[TextStyleRange]) -> Vec<Vec<S
                 });
             }
             lines.push(std::mem::take(&mut current_line));
+            code_unit_index += character.len_utf16();
             continue;
         }
 
-        let style = style_at_byte_index(byte_index, styles);
+        let style = style_at_code_unit_index(code_unit_index, styles);
 
         if !current_text.is_empty() && !text_style_matches(&style, &current_style) {
             current_line.push(StyledTextSegment {
@@ -637,6 +639,7 @@ fn build_styled_pdf_lines(content: &str, styles: &[TextStyleRange]) -> Vec<Vec<S
 
         current_style = style;
         current_text.push(character);
+        code_unit_index += character.len_utf16();
     }
 
     if !current_text.is_empty() {
@@ -650,11 +653,11 @@ fn build_styled_pdf_lines(content: &str, styles: &[TextStyleRange]) -> Vec<Vec<S
     lines
 }
 
-fn style_at_byte_index(byte_index: usize, styles: &[TextStyleRange]) -> TextStyle {
+fn style_at_code_unit_index(code_unit_index: usize, styles: &[TextStyleRange]) -> TextStyle {
     styles
         .iter()
         .rev()
-        .find(|range| range.from <= byte_index && byte_index < range.to)
+        .find(|range| range.from <= code_unit_index && code_unit_index < range.to)
         .map(|range| range.style.clone())
         .unwrap_or_default()
 }

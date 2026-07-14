@@ -205,6 +205,16 @@ export const CommandRegistry: Command[] = [
     action: handledByEditor
   },
   {
+    name: "new",
+    description: "Create a new .x2 note",
+    action: handledByEditor
+  },
+  {
+    name: "open",
+    description: "Open an .x2 note folder",
+    action: handledByEditor
+  },
+  {
     name: "save",
     description: "Save the current .x2 note",
     action: handledByEditor
