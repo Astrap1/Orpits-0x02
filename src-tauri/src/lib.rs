@@ -3,7 +3,7 @@ use printpdf::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -24,6 +24,7 @@ const PDF_POINT_TO_MM: f32 = 0.352_778;
 const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
 const NOTE_FOLDER_SETTINGS_FILE: &str = "note-folder-settings.json";
 const PYTHON_SNIPPET_TIMEOUT_SECONDS: u64 = 5;
+const CODE_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize)]
 struct NotePayload {
@@ -301,9 +302,7 @@ fn run_python_snippet(code: String) -> Result<CodeRunResult, String> {
     run_python_with_command("py", &["-3", "-"], &code)
         .or_else(|_| run_python_with_command("python", &["-"], &code))
         .map_err(|error| {
-            format!(
-                "{error} Make sure Python is installed and available as 'py -3' or 'python'."
-            )
+            format!("{error} Make sure Python is installed and available as 'py -3' or 'python'.")
         })
 }
 
@@ -320,6 +319,17 @@ fn run_python_with_command(
         .spawn()
         .map_err(|error| format!("Could not start {program}: {error}"))?;
 
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not capture Python output.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Could not capture Python errors.".to_string())?;
+    let stdout_reader = thread::spawn(move || read_code_stream(stdout));
+    let stderr_reader = thread::spawn(move || read_code_stream(stderr));
+
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(code.as_bytes())
@@ -327,43 +337,106 @@ fn run_python_with_command(
     }
 
     let started_at = Instant::now();
+    let mut timed_out = false;
 
-    loop {
+    let status = loop {
         if let Some(_status) = child
             .try_wait()
             .map_err(|error| format!("Could not check Python process: {error}"))?
         {
-            let output = child
-                .wait_with_output()
-                .map_err(|error| format!("Could not read Python output: {error}"))?;
-
-            return Ok(CodeRunResult {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code(),
-            });
+            break child
+                .wait()
+                .map_err(|error| format!("Could not finish Python process: {error}"))?;
         }
 
         if started_at.elapsed() >= Duration::from_secs(PYTHON_SNIPPET_TIMEOUT_SECONDS) {
+            timed_out = true;
             let _ = child.kill();
-            let output = child
-                .wait_with_output()
+            break child
+                .wait()
                 .map_err(|error| format!("Could not stop Python process: {error}"))?;
-            let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-            if !stderr.is_empty() && !stderr.ends_with('\n') {
-                stderr.push('\n');
-            }
-            stderr.push_str("Python snippet timed out after 5 seconds.");
-
-            return Ok(CodeRunResult {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr,
-                exit_code: None,
-            });
         }
 
         thread::sleep(Duration::from_millis(25));
+    };
+
+    let (stdout_bytes, stdout_truncated) = stdout_reader
+        .join()
+        .map_err(|_| "Could not finish reading Python output.".to_string())??;
+    let (stderr_bytes, stderr_truncated) = stderr_reader
+        .join()
+        .map_err(|_| "Could not finish reading Python errors.".to_string())??;
+    let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let mut stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+
+    if timed_out {
+        append_code_runner_message(&mut stderr, "Python snippet timed out after 5 seconds.");
+    }
+
+    if stdout_truncated || stderr_truncated {
+        append_code_runner_message(
+            &mut stderr,
+            "Output was truncated after 256 KiB per stream.",
+        );
+    }
+
+    Ok(CodeRunResult {
+        stdout,
+        stderr,
+        exit_code: if timed_out { None } else { status.code() },
+    })
+}
+
+fn read_code_stream<R: Read>(mut stream: R) -> Result<(Vec<u8>, bool), String> {
+    let mut captured = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut truncated = false;
+
+    loop {
+        let bytes_read = stream
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not read code output: {error}"))?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        let remaining = CODE_OUTPUT_LIMIT_BYTES.saturating_sub(captured.len());
+        let bytes_to_keep = remaining.min(bytes_read);
+        captured.extend_from_slice(&buffer[..bytes_to_keep]);
+        truncated |= bytes_to_keep < bytes_read;
+    }
+
+    Ok((captured, truncated))
+}
+
+fn append_code_runner_message(output: &mut String, message: &str) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(message);
+}
+
+#[cfg(test)]
+mod code_runner_tests {
+    use super::{read_code_stream, CODE_OUTPUT_LIMIT_BYTES};
+    use std::io::Cursor;
+
+    #[test]
+    fn code_stream_keeps_normal_output() {
+        let (captured, truncated) = read_code_stream(Cursor::new(b"hello\n".to_vec())).unwrap();
+
+        assert_eq!(captured, b"hello\n");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn code_stream_caps_large_output() {
+        let input = vec![b'x'; CODE_OUTPUT_LIMIT_BYTES + 1024];
+        let (captured, truncated) = read_code_stream(Cursor::new(input)).unwrap();
+
+        assert_eq!(captured.len(), CODE_OUTPUT_LIMIT_BYTES);
+        assert!(truncated);
     }
 }
 
@@ -823,9 +896,7 @@ fn estimate_pdf_text_width_mm(text: &str, style: &TextStyle) -> f32 {
     let bold_multiplier = if style.is_bold { 1.06 } else { 1.0 };
 
     text.chars()
-        .map(|character| {
-            font_size_mm * pdf_character_width_em(character) * bold_multiplier
-        })
+        .map(|character| font_size_mm * pdf_character_width_em(character) * bold_multiplier)
         .sum()
 }
 

@@ -112,30 +112,6 @@ input {
   transform: rotate(-45deg);
 }
 
-.run-code-button {
-  min-height: 28px;
-  padding: 0 12px;
-  border: 1px solid rgba(103, 232, 249, 0.24);
-  border-radius: 8px;
-  background: rgba(103, 232, 249, 0.09);
-  color: #dffbff;
-  font-size: 12px;
-  font-weight: 720;
-  cursor: pointer;
-}
-
-.run-code-button:hover:not(:disabled),
-.run-code-button:focus-visible {
-  border-color: rgba(103, 232, 249, 0.52);
-  background: rgba(103, 232, 249, 0.15);
-  outline: 0;
-}
-
-.run-code-button:disabled {
-  cursor: default;
-  opacity: 0.62;
-}
-
 .app-body {
   display: flex;
   min-height: 0;
@@ -657,128 +633,154 @@ input {
   }
 }
 
-.code-run-panel {
-  position: fixed;
-  right: 22px;
-  bottom: 22px;
-  z-index: 24;
+.editor-stage .cm-code-box-line {
+  border-right: 1px solid rgba(255, 255, 255, 0.11);
+  border-left: 1px solid rgba(255, 255, 255, 0.11);
+  background: rgba(18, 20, 26, 0.92);
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
+.editor-stage .cm-code-box-header {
+  min-height: 34px;
+  margin-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 14px 14px 0 0;
+  color: transparent !important;
+  font-size: 0;
+  line-height: 34px;
+}
+
+.editor-stage .cm-code-box-header::before {
+  content: "Python";
+  color: #dffbff;
+  font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.editor-stage .cm-code-box-header::after {
+  content: "Ctrl+Enter run";
+  float: right;
+  color: #777181;
+  font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.editor-stage .cm-code-box-source {
+  min-height: 24px;
+  color: #edfaff;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.editor-stage .cm-code-box-footer {
+  min-height: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: transparent !important;
+  font-size: 0;
+  line-height: 10px;
+}
+
+.editor-stage .cm-code-box-line.cm-code-box-selected {
+  border-right-color: rgba(103, 232, 249, 0.82);
+  border-left-color: rgba(103, 232, 249, 0.82);
+  background: rgba(20, 28, 34, 0.96);
+  box-shadow: inset 3px 0 12px -8px rgba(103, 232, 249, 0.92), inset -3px 0 12px -8px rgba(103, 232, 249, 0.92);
+}
+
+.editor-stage .cm-code-box-header.cm-code-box-selected {
+  border-top-color: rgba(103, 232, 249, 0.82);
+}
+
+.editor-stage .cm-code-box-line.cm-code-box-editing {
+  border-right-color: rgba(196, 167, 255, 0.34);
+  border-left-color: rgba(196, 167, 255, 0.34);
+}
+
+.cm-code-box-output {
   display: grid;
-  gap: 8px;
-  width: min(430px, calc(100vw - 44px));
-  max-height: min(310px, calc(100vh - 150px));
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 14px;
-  background: rgba(15, 17, 20, 0.94);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.34);
-  color: #eee8f8;
-  backdrop-filter: blur(18px) saturate(130%);
-  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  gap: 7px;
+  min-height: 68px;
+  padding: 10px 16px 12px;
+  border-right: 1px solid rgba(255, 255, 255, 0.11);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.11);
+  border-left: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 0 0 14px 14px;
+  background: rgba(12, 14, 18, 0.96);
+  color: #d8d1e5;
+  font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
 }
 
-.code-run-panel.running {
-  border-color: rgba(103, 232, 249, 0.28);
+.cm-code-box-output.is-selected {
+  border-right-color: rgba(103, 232, 249, 0.82);
+  border-bottom-color: rgba(103, 232, 249, 0.82);
+  border-left-color: rgba(103, 232, 249, 0.82);
+  box-shadow: 0 12px 34px rgba(4, 18, 22, 0.3), inset 3px 0 12px -8px rgba(103, 232, 249, 0.92), inset -3px 0 12px -8px rgba(103, 232, 249, 0.92);
 }
 
-.code-run-panel.success {
-  border-color: rgba(142, 230, 168, 0.24);
+.cm-code-box-output.is-editing {
+  border-right-color: rgba(196, 167, 255, 0.34);
+  border-bottom-color: rgba(196, 167, 255, 0.34);
+  border-left-color: rgba(196, 167, 255, 0.34);
 }
 
-.code-run-panel.error {
-  border-color: rgba(255, 143, 155, 0.3);
-}
-
-.code-run-header {
+.cm-code-box-output-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: #f8f1ff;
-  font-size: 12px;
-  font-weight: 780;
-}
-
-.code-run-header span:last-child {
-  color: #9c94aa;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: #f5efff;
   font-size: 11px;
+  font-weight: 760;
   text-transform: uppercase;
 }
 
-.code-run-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+.cm-code-box-output-header span:last-child {
+  color: #777181;
+  font-size: 10px;
 }
 
-.code-run-actions button {
-  min-width: 0;
-  min-height: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.055);
-  color: #cfc7dc;
-  font-size: 12px;
-  font-weight: 720;
-  cursor: pointer;
+.cm-code-box-output.is-success .cm-code-box-output-header span:last-child {
+  color: #8ee6a8;
 }
 
-.code-run-actions button.active {
-  border-color: rgba(103, 232, 249, 0.48);
-  background: rgba(103, 232, 249, 0.13);
-  color: #e8fdff;
-  box-shadow: 0 0 0 2px rgba(103, 232, 249, 0.1);
+.cm-code-box-output.is-error .cm-code-box-output-header span:last-child {
+  color: #ff8f9b;
 }
 
-.code-run-actions button:hover:not(:disabled),
-.code-run-actions button:focus-visible {
-  border-color: rgba(103, 232, 249, 0.42);
-  outline: 0;
-}
-
-.code-run-actions button:disabled {
-  cursor: default;
-  opacity: 0.56;
-}
-
-.code-run-message {
-  color: #bdb5cb;
-  font-size: 12px;
-  font-weight: 620;
-  line-height: 1.35;
-}
-
-.code-run-keys {
-  overflow: hidden;
-  color: #81798f;
+.cm-code-box-output-message,
+.cm-code-box-shortcut {
+  color: #8e8799;
   font-size: 11px;
-  font-weight: 680;
-  letter-spacing: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
 }
 
-.code-run-output {
-  display: grid;
-  gap: 8px;
-  min-height: 0;
-  overflow: auto;
-}
-
-.code-run-output pre {
+.cm-code-box-output pre {
+  max-height: 160px;
   margin: 0;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.055);
+  overflow: auto;
   color: #dffbff;
   font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.code-run-output .code-run-stderr {
+.cm-code-box-output .cm-code-box-stderr {
   color: #ffb4bd;
+}
+
+.cm-code-box-shortcut {
+  color: #686270;
 }
 
 .api-key-overlay {
