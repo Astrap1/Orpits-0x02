@@ -633,6 +633,50 @@ input {
   }
 }
 
+.editor-stage .cm-table-line {
+  border-right: 1px solid rgba(255, 255, 255, 0.11);
+  border-left: 1px solid rgba(255, 255, 255, 0.11);
+  background: rgba(18, 20, 26, 0.82);
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
+.editor-stage .cm-table-header {
+  margin-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px 12px 0 0;
+  background: rgba(26, 30, 38, 0.94);
+  font-weight: 760;
+}
+
+.editor-stage .cm-table-separator {
+  min-height: 7px;
+  color: transparent !important;
+  font-size: 0;
+  line-height: 7px;
+}
+
+.editor-stage .cm-table-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.editor-stage .cm-table-row:last-child {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 0 0 12px 12px;
+}
+
+.editor-stage .cm-table-cell {
+  color: #eef8ff;
+}
+
+.editor-stage .cm-table-cell-header {
+  color: #dffbff;
+  font-weight: 760;
+}
+
 .editor-stage .cm-code-box-line {
   border-right: 1px solid rgba(255, 255, 255, 0.11);
   border-left: 1px solid rgba(255, 255, 255, 0.11);

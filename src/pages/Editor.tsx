@@ -130,6 +130,26 @@ interface CodeBoxOutput extends CodeRunState {
   runId: string;
 }
 
+interface TableCell {
+  text: string;
+  rowIndex: number;
+  columnIndex: number;
+  from: number;
+  to: number;
+  lineFrom: number;
+  lineTo: number;
+}
+
+interface TableBlock {
+  from: number;
+  to: number;
+  headerLineFrom: number;
+  separatorLineFrom: number;
+  lineFroms: number[];
+  columnCount: number;
+  cells: TableCell[];
+}
+
 interface PendingStyleRestore {
   content: string;
   styles: TextStyleRange[];
@@ -495,11 +515,15 @@ function buildCommandLineDecorations(doc: Text) {
   const commandTokenPattern = /(\/\/[a-z]*)(?:\s+([^/\s]+))?/gi;
   const aiCommandPattern = /\\\\.+/g;
   const codeBlocks = getPythonCodeBlocks(doc);
+  const tables = getMarkdownTables(doc);
 
   for (let index = 1; index <= doc.lines; index += 1) {
     const line = doc.line(index);
 
-    if (codeBlocks.some((block) => block.blockFrom <= line.from && line.from <= block.blockTo)) {
+    if (
+      codeBlocks.some((block) => block.blockFrom <= line.from && line.from <= block.blockTo) ||
+      tables.some((table) => table.from <= line.from && line.from <= table.to)
+    ) {
       continue;
     }
 
@@ -542,6 +566,60 @@ const commandLineDecorations = StateField.define<DecorationSet>({
   update(decorations, transaction) {
     if (transaction.docChanged) {
       return buildCommandLineDecorations(transaction.state.doc);
+    }
+
+    return decorations.map(transaction.changes);
+  },
+  provide: (field) => EditorView.decorations.from(field)
+});
+
+function buildTableDecorations(doc: Text) {
+  const builder = new RangeSetBuilder<Decoration>();
+  const ranges: { from: number; to: number; decoration: Decoration }[] = [];
+
+  for (const table of getMarkdownTables(doc)) {
+    for (const lineFrom of table.lineFroms) {
+      const line = doc.lineAt(lineFrom);
+      const lineClass = lineFrom === table.headerLineFrom
+        ? "cm-table-line cm-table-header"
+        : lineFrom === table.separatorLineFrom
+          ? "cm-table-line cm-table-separator"
+          : "cm-table-line cm-table-row";
+
+      ranges.push({
+        from: line.from,
+        to: line.from,
+        decoration: Decoration.line({ class: lineClass })
+      });
+    }
+
+    for (const cell of table.cells) {
+      if (cell.from < cell.to) {
+        ranges.push({
+          from: Math.max(cell.lineFrom, cell.from),
+          to: Math.max(cell.lineFrom, cell.to),
+          decoration: Decoration.mark({ class: cell.rowIndex < 0 ? "cm-table-cell cm-table-cell-header" : "cm-table-cell" })
+        });
+      }
+    }
+  }
+
+  ranges
+    .sort((left, right) => left.from - right.from || left.to - right.to)
+    .forEach((range) => {
+      builder.add(range.from, range.to, range.decoration);
+    });
+
+  return builder.finish();
+}
+
+const tableDecorations = StateField.define<DecorationSet>({
+  create(state) {
+    return buildTableDecorations(state.doc);
+  },
+  update(decorations, transaction) {
+    if (transaction.docChanged) {
+      return buildTableDecorations(transaction.state.doc);
     }
 
     return decorations.map(transaction.changes);
@@ -993,6 +1071,10 @@ function getCommandAtCursor(view: EditorView) {
     return null;
   }
 
+  if (getMarkdownTableAtPosition(view.state.doc, selection.head)) {
+    return null;
+  }
+
   const line = view.state.doc.lineAt(selection.head);
   const cursorOffset = selection.head - line.from;
   const textBeforeCursor = line.text.slice(0, cursorOffset);
@@ -1021,6 +1103,10 @@ function getAiCommandAtCursor(view: EditorView) {
   }
 
   if (getPythonCodeBlockAtPosition(view.state.doc, selection.head)) {
+    return null;
+  }
+
+  if (getMarkdownTableAtPosition(view.state.doc, selection.head)) {
     return null;
   }
 
@@ -1078,6 +1164,328 @@ function getPythonCodeBlockAtPosition(doc: Text, position: number) {
   return getPythonCodeBlocks(doc).find(
     (block) => block.blockFrom <= position && position <= block.blockTo
   ) ?? null;
+}
+
+function isPotentialTableLine(text: string) {
+  const trimmed = text.trim();
+  return trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.split("|").length >= 4;
+}
+
+function isMarkdownTableSeparator(text: string) {
+  if (!isPotentialTableLine(text)) {
+    return false;
+  }
+
+  return text
+    .trim()
+    .slice(1, -1)
+    .split("|")
+    .every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function parseTableLineCells(lineText: string, lineFrom: number, rowIndex: number) {
+  const cells: TableCell[] = [];
+  const pipeIndexes: number[] = [];
+
+  for (let index = 0; index < lineText.length; index += 1) {
+    if (lineText[index] === "|") {
+      pipeIndexes.push(index);
+    }
+  }
+
+  for (let index = 0; index < pipeIndexes.length - 1; index += 1) {
+    const rawFrom = pipeIndexes[index] + 1;
+    const rawTo = pipeIndexes[index + 1];
+    const rawText = lineText.slice(rawFrom, rawTo);
+    const leadingWhitespace = rawText.match(/^\s*/)?.[0].length ?? 0;
+    const trailingWhitespace = rawText.match(/\s*$/)?.[0].length ?? 0;
+    const contentFrom = rawFrom + leadingWhitespace;
+    const contentTo = rawTo - trailingWhitespace;
+    const emptyAnchor = rawFrom + Math.floor(rawText.length / 2);
+    const from = lineFrom + (contentFrom <= contentTo ? contentFrom : emptyAnchor);
+    const to = lineFrom + (contentFrom <= contentTo ? contentTo : emptyAnchor);
+
+    cells.push({
+      text: rawText.trim(),
+      rowIndex,
+      columnIndex: index,
+      from,
+      to,
+      lineFrom,
+      lineTo: lineFrom + lineText.length
+    });
+  }
+
+  return cells;
+}
+
+function getMarkdownTables(doc: Text): TableBlock[] {
+  const tables: TableBlock[] = [];
+  let lineNumber = 1;
+
+  while (lineNumber <= doc.lines) {
+    if (lineNumber + 1 > doc.lines) {
+      break;
+    }
+
+    const headerLine = doc.line(lineNumber);
+    const separatorLine = doc.line(lineNumber + 1);
+
+    if (!isPotentialTableLine(headerLine.text) || !isMarkdownTableSeparator(separatorLine.text)) {
+      lineNumber += 1;
+      continue;
+    }
+
+    const lineFroms = [headerLine.from, separatorLine.from];
+    let cursorLineNumber = lineNumber + 2;
+
+    while (cursorLineNumber <= doc.lines) {
+      const rowLine = doc.line(cursorLineNumber);
+
+      if (!isPotentialTableLine(rowLine.text) || isMarkdownTableSeparator(rowLine.text)) {
+        break;
+      }
+
+      lineFroms.push(rowLine.from);
+      cursorLineNumber += 1;
+    }
+
+    const columnCount = parseTableLineCells(headerLine.text, headerLine.from, -1).length;
+    const cells: TableCell[] = [];
+
+    for (let index = 0; index < lineFroms.length; index += 1) {
+      if (index === 1) {
+        continue;
+      }
+
+      const line = doc.lineAt(lineFroms[index]);
+      const rowIndex = index === 0 ? -1 : index - 2;
+      cells.push(...parseTableLineCells(line.text, line.from, rowIndex));
+    }
+
+    const lastLine = doc.lineAt(lineFroms[lineFroms.length - 1]);
+    tables.push({
+      from: headerLine.from,
+      to: lastLine.to,
+      headerLineFrom: headerLine.from,
+      separatorLineFrom: separatorLine.from,
+      lineFroms,
+      columnCount,
+      cells
+    });
+
+    lineNumber = cursorLineNumber;
+  }
+
+  return tables;
+}
+
+function getMarkdownTableAtPosition(doc: Text, position: number) {
+  return getMarkdownTables(doc).find((table) => table.from <= position && position <= table.to) ?? null;
+}
+
+function getTableCellAtPosition(doc: Text, position: number) {
+  const table = getMarkdownTableAtPosition(doc, position);
+
+  if (!table) {
+    return null;
+  }
+
+  const cell = table.cells.find((candidate) => (
+    candidate.from <= position && position <= candidate.to
+  )) ?? table.cells.find((candidate) => (
+    candidate.lineFrom <= position &&
+    position <= candidate.lineTo &&
+    candidate.from <= candidate.to
+  ));
+
+  return cell ? { table, cell } : null;
+}
+
+function getTableCellByIndexes(table: TableBlock, rowIndex: number, columnIndex: number) {
+  return table.cells.find((cell) => cell.rowIndex === rowIndex && cell.columnIndex === columnIndex) ?? null;
+}
+
+function getEmptyMarkdownTableRow(columnCount: number) {
+  return `| ${Array.from({ length: columnCount }, () => "").join(" | ")} |`;
+}
+
+function moveToTableCell(view: EditorView, cell: TableCell) {
+  view.dispatch({
+    selection: { anchor: cell.from },
+    scrollIntoView: true
+  });
+  return true;
+}
+
+function moveTableCell(view: EditorView, direction: "next" | "previous" | "up" | "down") {
+  const context = getTableCellAtPosition(view.state.doc, view.state.selection.main.head);
+
+  if (!context) {
+    return false;
+  }
+
+  const { table, cell } = context;
+  let targetRow = cell.rowIndex;
+  let targetColumn = cell.columnIndex;
+
+  if (direction === "next") {
+    targetColumn += 1;
+    if (targetColumn >= table.columnCount) {
+      targetColumn = 0;
+      targetRow += 1;
+    }
+  } else if (direction === "previous") {
+    targetColumn -= 1;
+    if (targetColumn < 0) {
+      targetColumn = table.columnCount - 1;
+      targetRow -= 1;
+    }
+  } else {
+    targetRow += direction === "down" ? 1 : -1;
+  }
+
+  if (targetRow < -1) {
+    return false;
+  }
+
+  const targetCell = getTableCellByIndexes(table, targetRow, targetColumn);
+  return targetCell ? moveToTableCell(view, targetCell) : false;
+}
+
+function addTableRowAfter(view: EditorView, table: TableBlock, columnIndex: number) {
+  const insert = `\n${getEmptyMarkdownTableRow(table.columnCount)}`;
+
+  view.dispatch({
+    changes: { from: table.to, to: table.to, insert },
+    selection: { anchor: table.to + insert.length },
+    scrollIntoView: true
+  });
+
+  const nextTable = getMarkdownTableAtPosition(view.state.doc, table.from);
+  const targetCell = nextTable
+    ? getTableCellByIndexes(nextTable, nextTable.lineFroms.length - 3, columnIndex)
+    : null;
+
+  if (targetCell) {
+    return moveToTableCell(view, targetCell);
+  }
+
+  return true;
+}
+
+function moveTableCellOrAddRow(view: EditorView) {
+  const context = getTableCellAtPosition(view.state.doc, view.state.selection.main.head);
+
+  if (!context) {
+    return false;
+  }
+
+  const { table, cell } = context;
+
+  if (cell.rowIndex < 0) {
+    return moveTableCell(view, "down");
+  }
+
+  const nextCell = getTableCellByIndexes(table, cell.rowIndex + 1, cell.columnIndex);
+  return nextCell ? moveToTableCell(view, nextCell) : addTableRowAfter(view, table, cell.columnIndex);
+}
+
+function moveTableCellAtHorizontalBoundary(view: EditorView, direction: "left" | "right") {
+  const selection = view.state.selection.main;
+
+  if (!selection.empty) {
+    return false;
+  }
+
+  const context = getTableCellAtPosition(view.state.doc, selection.head);
+
+  if (!context) {
+    return false;
+  }
+
+  const { cell } = context;
+
+  if (direction === "left" && selection.head <= cell.from) {
+    return moveTableCell(view, "previous");
+  }
+
+  if (direction === "right" && selection.head >= cell.to) {
+    return moveTableCell(view, "next");
+  }
+
+  return false;
+}
+
+function columnLettersToIndex(letters: string) {
+  return letters.toUpperCase().split("").reduce((total, letter) => (
+    total * 26 + letter.charCodeAt(0) - 64
+  ), 0) - 1;
+}
+
+function parseTableFormula(text: string) {
+  const match = text.trim().match(/^\/\/(sum|avg|mean|median|min|max|count)\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)$/i);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    operation: match[1].toLowerCase(),
+    fromColumn: columnLettersToIndex(match[2]),
+    fromRow: Number(match[3]) - 1,
+    toColumn: columnLettersToIndex(match[4]),
+    toRow: Number(match[5]) - 1
+  };
+}
+
+function evaluateTableFormula(table: TableBlock, formula: NonNullable<ReturnType<typeof parseTableFormula>>) {
+  const fromRow = Math.min(formula.fromRow, formula.toRow);
+  const toRow = Math.max(formula.fromRow, formula.toRow);
+  const fromColumn = Math.min(formula.fromColumn, formula.toColumn);
+  const toColumn = Math.max(formula.fromColumn, formula.toColumn);
+  const values: number[] = [];
+
+  for (let row = fromRow; row <= toRow; row += 1) {
+    for (let column = fromColumn; column <= toColumn; column += 1) {
+      const cell = getTableCellByIndexes(table, row, column);
+      const value = Number(cell?.text.replace(/,/g, ""));
+
+      if (Number.isFinite(value)) {
+        values.push(value);
+      }
+    }
+  }
+
+  if (values.length === 0) {
+    return null;
+  }
+
+  if (formula.operation === "count") {
+    return String(values.length);
+  }
+
+  if (formula.operation === "sum") {
+    return String(values.reduce((total, value) => total + value, 0));
+  }
+
+  if (formula.operation === "avg" || formula.operation === "mean") {
+    return String(values.reduce((total, value) => total + value, 0) / values.length);
+  }
+
+  if (formula.operation === "min") {
+    return String(Math.min(...values));
+  }
+
+  if (formula.operation === "max") {
+    return String(Math.max(...values));
+  }
+
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? String((sorted[middle - 1] + sorted[middle]) / 2)
+    : String(sorted[middle]);
 }
 
 function getSafeFileName(title: string, extension: "x2" | "pdf") {
@@ -1941,6 +2349,41 @@ function Editor() {
     void runFileCommand("new", value, activeNoteTitle, openedNotePath, currentStyles);
   }, [activeNoteTitle, openedNotePath, runFileCommand, value]);
 
+  const runTableFormulaAtCursor = useCallback((view: EditorView) => {
+    const context = getTableCellAtPosition(view.state.doc, view.state.selection.main.head);
+
+    if (!context) {
+      return false;
+    }
+
+    const formula = parseTableFormula(context.cell.text);
+
+    if (!formula) {
+      return false;
+    }
+
+    const result = evaluateTableFormula(context.table, formula);
+
+    if (result === null) {
+      setFileStatus("Table formula needs a valid range with numeric values.");
+      setFileStatusKind("error");
+      return true;
+    }
+
+    view.dispatch({
+      changes: {
+        from: context.cell.from,
+        to: context.cell.to,
+        insert: result
+      },
+      selection: { anchor: context.cell.from + result.length },
+      scrollIntoView: true
+    });
+    setFileStatus("Table formula calculated.");
+    setFileStatusKind("success");
+    return true;
+  }, []);
+
   const runPythonBlockAtCursor = useCallback((view: EditorView) => {
     const selectedBlock = getSelectedPythonCodeBlock(view);
     const editingBlock = getEditingPythonCodeBlock(view);
@@ -2229,6 +2672,29 @@ function Editor() {
       pendingCommand.to
     );
 
+    if (commandName === "table") {
+      const tableTemplate = [
+        "| Column 1 | Column 2 | Column 3 |",
+        "| --- | --- | --- |",
+        "|  |  |  |",
+        "|  |  |  |",
+        ""
+      ].join("\n");
+
+      view.dispatch({
+        changes: {
+          from: pendingCommand.from,
+          to: pendingCommand.to,
+          insert: tableTemplate
+        },
+        selection: { anchor: pendingCommand.from + tableTemplate.indexOf("Column 1") },
+        scrollIntoView: true
+      });
+      setShowCommands(false);
+      setCommandQuery("");
+      return true;
+    }
+
     if (commandName === "code") {
       const codeTemplate = "```python\nprint(\"Hello from x2pad\")\n```\n";
 
@@ -2313,6 +2779,7 @@ function Editor() {
     EditorView.lineWrapping,
     textStyleDecorations,
     commandLineDecorations,
+    tableDecorations,
     codeBoxDecorations,
     EditorView.inputHandler.of((view, _from, _to, text) => {
       const block = getSelectedPythonCodeBlock(view);
@@ -2344,7 +2811,11 @@ function Editor() {
             return false;
           }
 
-          return runAiCommandAtCursor(view) || runCommandAtCursor(view) || continueListAtCursor(view);
+          return runTableFormulaAtCursor(view) ||
+            moveTableCellOrAddRow(view) ||
+            runAiCommandAtCursor(view) ||
+            runCommandAtCursor(view) ||
+            continueListAtCursor(view);
         }
       },
       {
@@ -2357,23 +2828,27 @@ function Editor() {
       },
       {
         key: "ArrowDown",
-        run: (view) => moveInsidePythonCodeBoxOneLine(view, "down") || moveOutsideCodeBoxOneLine(view, "down")
+        run: (view) => moveInsidePythonCodeBoxOneLine(view, "down") || moveTableCell(view, "down") || moveOutsideCodeBoxOneLine(view, "down")
       },
       {
         key: "ArrowUp",
-        run: (view) => moveInsidePythonCodeBoxOneLine(view, "up") || moveOutsideCodeBoxOneLine(view, "up")
+        run: (view) => moveInsidePythonCodeBoxOneLine(view, "up") || moveTableCell(view, "up") || moveOutsideCodeBoxOneLine(view, "up")
       },
       {
         key: "ArrowLeft",
-        run: (view) => !!getSelectedPythonCodeBlock(view) || keepHorizontalArrowInsidePythonCodeBox(view, "left")
+        run: (view) => !!getSelectedPythonCodeBlock(view) || moveTableCellAtHorizontalBoundary(view, "left") || keepHorizontalArrowInsidePythonCodeBox(view, "left")
       },
       {
         key: "ArrowRight",
-        run: (view) => !!getSelectedPythonCodeBlock(view) || keepHorizontalArrowInsidePythonCodeBox(view, "right")
+        run: (view) => !!getSelectedPythonCodeBlock(view) || moveTableCellAtHorizontalBoundary(view, "right") || keepHorizontalArrowInsidePythonCodeBox(view, "right")
       },
       {
         key: "Tab",
-        run: (view) => aiSession?.status === "ready" ? cycleAiPlacement() : indentInsidePythonCodeBox(view)
+        run: (view) => aiSession?.status === "ready" ? cycleAiPlacement() : moveTableCell(view, "next") || indentInsidePythonCodeBox(view)
+      },
+      {
+        key: "Shift-Tab",
+        run: (view) => moveTableCell(view, "previous")
       },
       {
         key: "Escape",
@@ -2522,7 +2997,8 @@ function Editor() {
     cycleAiPlacement,
     runAiCommandAtCursor,
     runCommandAtCursor,
-    runPythonBlockAtCursor
+    runPythonBlockAtCursor,
+    runTableFormulaAtCursor
   ]);
 
   const onChange = useCallback((val: string, viewUpdate: any) => {
@@ -2530,6 +3006,15 @@ function Editor() {
 
     const state = viewUpdate.state;
     const cursor = state.selection.main.head;
+    const isInsideCommandExcludedBlock = !!getPythonCodeBlockAtPosition(state.doc, cursor) ||
+      !!getMarkdownTableAtPosition(state.doc, cursor);
+
+    if (isInsideCommandExcludedBlock) {
+      setShowCommands(false);
+      setCommandQuery("");
+      return;
+    }
+
     const line = state.doc.lineAt(cursor);
     const cursorOffset = cursor - line.from;
     const textBeforeCursor = line.text.slice(0, cursorOffset);

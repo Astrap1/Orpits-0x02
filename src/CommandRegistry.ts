@@ -205,6 +205,11 @@ export const CommandRegistry: Command[] = [
     action: handledByEditor
   },
   {
+    name: "table",
+    description: "Insert a keyboard table",
+    action: handledByEditor
+  },
+  {
     name: "new",
     description: "Create a new .x2 note",
     action: handledByEditor
