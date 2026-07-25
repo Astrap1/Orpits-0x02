@@ -4,7 +4,7 @@ import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import { pythonLanguage } from "@codemirror/lang-python";
 import { indentWithTab } from "@codemirror/commands";
-import { Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
+import { ChangeSet, Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, WidgetType } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -591,6 +591,16 @@ function buildTableDecorations(doc: Text) {
         to: line.from,
         decoration: Decoration.line({ class: lineClass })
       });
+
+      for (let index = 0; index < line.text.length; index += 1) {
+        if (line.text[index] === "|") {
+          ranges.push({
+            from: line.from + index,
+            to: line.from + index + 1,
+            decoration: Decoration.mark({ class: "cm-table-pipe" })
+          });
+        }
+      }
     }
 
     for (const cell of table.cells) {
@@ -1310,12 +1320,143 @@ function getEmptyMarkdownTableRow(columnCount: number) {
   return `| ${Array.from({ length: columnCount }, () => "").join(" | ")} |`;
 }
 
+function getMarkdownTableLineCells(text: string) {
+  return text
+    .trim()
+    .slice(1, -1)
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function getPipeIndexes(text: string) {
+  const indexes: number[] = [];
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "|") {
+      indexes.push(index);
+    }
+  }
+
+  return indexes;
+}
+
+function buildNormalizedTableLines(doc: Text, table: TableBlock) {
+  const tableRows = table.lineFroms.map((lineFrom) => {
+    const line = doc.lineAt(lineFrom);
+    return {
+      line,
+      cells: getMarkdownTableLineCells(line.text),
+      isSeparator: line.from === table.separatorLineFrom
+    };
+  });
+  const widths = Array.from({ length: table.columnCount }, (_, columnIndex) => (
+    Math.max(
+      3,
+      ...tableRows
+        .filter((row) => !row.isSeparator)
+        .map((row) => row.cells[columnIndex]?.length ?? 0)
+    )
+  ));
+
+  return tableRows.map((row) => {
+    const cells = Array.from({ length: table.columnCount }, (_, columnIndex) => {
+      if (row.isSeparator) {
+        return "---".padEnd(widths[columnIndex], " ");
+      }
+
+      return (row.cells[columnIndex] ?? "").padEnd(widths[columnIndex], " ");
+    });
+
+    return `| ${cells.join(" | ")} |`;
+  });
+}
+
+function normalizeTable(view: EditorView, table: TableBlock) {
+  const nextLines = buildNormalizedTableLines(view.state.doc, table);
+  const changes = table.lineFroms
+    .map((lineFrom, index) => {
+      const line = view.state.doc.lineAt(lineFrom);
+      const insert = nextLines[index];
+
+      if (line.text === insert) {
+        return null;
+      }
+
+      return {
+        from: line.from,
+        to: line.to,
+        insert
+      };
+    })
+    .filter((change): change is { from: number; to: number; insert: string } => change !== null);
+
+  if (changes.length === 0) {
+    return false;
+  }
+
+  view.dispatch({
+    changes,
+    scrollIntoView: true
+  });
+  return true;
+}
+
 function moveToTableCell(view: EditorView, cell: TableCell) {
   view.dispatch({
     selection: { anchor: cell.from },
     scrollIntoView: true
   });
   return true;
+}
+
+function normalizeTableAndMoveToCell(
+  view: EditorView,
+  table: TableBlock,
+  rowIndex: number,
+  columnIndex: number
+) {
+  normalizeTable(view, table);
+
+  const nextTable = getMarkdownTableAtPosition(view.state.doc, table.from);
+  const targetCell = nextTable ? getTableCellByIndexes(nextTable, rowIndex, columnIndex) : null;
+
+  if (targetCell) {
+    return moveToTableCell(view, targetCell);
+  }
+
+  return true;
+}
+
+function normalizeTableAndKeepCursor(view: EditorView, table: TableBlock, cell: TableCell, cursorPosition: number) {
+  const cellOffset = Math.max(0, cursorPosition - cell.from);
+
+  if (!normalizeTable(view, table)) {
+    return false;
+  }
+
+  const nextTable = getMarkdownTableAtPosition(view.state.doc, table.from);
+  const nextCell = nextTable ? getTableCellByIndexes(nextTable, cell.rowIndex, cell.columnIndex) : null;
+
+  if (nextCell) {
+    view.dispatch({
+      selection: { anchor: Math.min(nextCell.to, nextCell.from + cellOffset) },
+      scrollIntoView: true
+    });
+  }
+
+  return true;
+}
+
+function tableWasChanged(changes: ChangeSet, table: TableBlock) {
+  let changed = false;
+
+  changes.iterChanges((_fromA: number, _toA: number, fromB: number, toB: number) => {
+    if (fromB <= table.to && toB >= table.from) {
+      changed = true;
+    }
+  });
+
+  return changed;
 }
 
 function moveTableCell(view: EditorView, direction: "next" | "previous" | "up" | "down") {
@@ -1350,7 +1491,9 @@ function moveTableCell(view: EditorView, direction: "next" | "previous" | "up" |
   }
 
   const targetCell = getTableCellByIndexes(table, targetRow, targetColumn);
-  return targetCell ? moveToTableCell(view, targetCell) : false;
+  return targetCell
+    ? normalizeTableAndMoveToCell(view, table, targetCell.rowIndex, targetCell.columnIndex)
+    : false;
 }
 
 function addTableRowAfter(view: EditorView, table: TableBlock, columnIndex: number) {
@@ -1367,11 +1510,9 @@ function addTableRowAfter(view: EditorView, table: TableBlock, columnIndex: numb
     ? getTableCellByIndexes(nextTable, nextTable.lineFroms.length - 3, columnIndex)
     : null;
 
-  if (targetCell) {
-    return moveToTableCell(view, targetCell);
-  }
-
-  return true;
+  return nextTable && targetCell
+    ? normalizeTableAndMoveToCell(view, nextTable, targetCell.rowIndex, targetCell.columnIndex)
+    : true;
 }
 
 function moveTableCellOrAddRow(view: EditorView) {
@@ -1388,7 +1529,53 @@ function moveTableCellOrAddRow(view: EditorView) {
   }
 
   const nextCell = getTableCellByIndexes(table, cell.rowIndex + 1, cell.columnIndex);
-  return nextCell ? moveToTableCell(view, nextCell) : addTableRowAfter(view, table, cell.columnIndex);
+  return nextCell
+    ? normalizeTableAndMoveToCell(view, table, nextCell.rowIndex, nextCell.columnIndex)
+    : addTableRowAfter(view, table, cell.columnIndex);
+}
+
+function addTableColumnAfter(view: EditorView) {
+  const context = getTableCellAtPosition(view.state.doc, view.state.selection.main.head);
+
+  if (!context) {
+    return false;
+  }
+
+  const { table, cell } = context;
+  const changes = table.lineFroms
+    .map((lineFrom) => {
+      const line = view.state.doc.lineAt(lineFrom);
+      const pipeIndexes = getPipeIndexes(line.text);
+      const isLastColumn = cell.columnIndex >= table.columnCount - 1;
+      const insertAt = isLastColumn
+        ? line.to
+        : line.from + pipeIndexes[cell.columnIndex + 1] + 1;
+      const insert = lineFrom === table.headerLineFrom
+        ? " New Column |"
+        : lineFrom === table.separatorLineFrom
+          ? " --- |"
+          : "  |";
+
+      return {
+        from: insertAt,
+        to: insertAt,
+        insert
+      };
+    });
+
+  view.dispatch({
+    changes,
+    scrollIntoView: true
+  });
+
+  const nextTable = getMarkdownTableAtPosition(view.state.doc, table.from);
+  const targetCell = nextTable
+    ? getTableCellByIndexes(nextTable, cell.rowIndex, cell.columnIndex + 1)
+    : null;
+
+  return nextTable && targetCell
+    ? normalizeTableAndMoveToCell(view, nextTable, targetCell.rowIndex, targetCell.columnIndex)
+    : true;
 }
 
 function moveTableCellAtHorizontalBoundary(view: EditorView, direction: "left" | "right") {
@@ -2379,6 +2566,16 @@ function Editor() {
       selection: { anchor: context.cell.from + result.length },
       scrollIntoView: true
     });
+
+    const nextTable = getMarkdownTableAtPosition(view.state.doc, context.table.from);
+    const nextCell = nextTable
+      ? getTableCellByIndexes(nextTable, context.cell.rowIndex, context.cell.columnIndex)
+      : null;
+
+    if (nextTable && nextCell) {
+      normalizeTableAndMoveToCell(view, nextTable, nextCell.rowIndex, nextCell.columnIndex);
+    }
+
     setFileStatus("Table formula calculated.");
     setFileStatusKind("success");
     return true;
@@ -2675,9 +2872,9 @@ function Editor() {
     if (commandName === "table") {
       const tableTemplate = [
         "| Column 1 | Column 2 | Column 3 |",
-        "| --- | --- | --- |",
-        "|  |  |  |",
-        "|  |  |  |",
+        "| ---      | ---      | ---      |",
+        "|          |          |          |",
+        "|          |          |          |",
         ""
       ].join("\n");
 
@@ -2690,6 +2887,12 @@ function Editor() {
         selection: { anchor: pendingCommand.from + tableTemplate.indexOf("Column 1") },
         scrollIntoView: true
       });
+      const table = getMarkdownTableAtPosition(view.state.doc, pendingCommand.from);
+
+      if (table) {
+        normalizeTableAndMoveToCell(view, table, -1, 0);
+      }
+
       setShowCommands(false);
       setCommandQuery("");
       return true;
@@ -2847,6 +3050,10 @@ function Editor() {
         run: (view) => aiSession?.status === "ready" ? cycleAiPlacement() : moveTableCell(view, "next") || indentInsidePythonCodeBox(view)
       },
       {
+        key: "Ctrl-Tab",
+        run: addTableColumnAfter
+      },
+      {
         key: "Shift-Tab",
         run: (view) => moveTableCell(view, "previous")
       },
@@ -2870,6 +3077,19 @@ function Editor() {
     EditorView.updateListener.of((update) => {
       if (!update.docChanged) {
         return;
+      }
+
+      const tableContext = update.state.selection.main.empty
+        ? getTableCellAtPosition(update.state.doc, update.state.selection.main.head)
+        : null;
+
+      if (tableContext && tableWasChanged(update.changes, tableContext.table)) {
+        normalizeTableAndKeepCursor(
+          update.view,
+          tableContext.table,
+          tableContext.cell,
+          update.state.selection.main.head
+        );
       }
 
       const previousCodeBlocks = getPythonCodeBlocks(update.startState.doc);
