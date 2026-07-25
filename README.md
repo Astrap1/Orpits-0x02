@@ -68,17 +68,19 @@ Currently, we require users to input their Gemini API key into the app in order 
 The code box allows users to write and run code snippets directly inside their notes. This is especially useful for students, developers, and technical users who want to test ideas without leaving the editor. The goal is to make x2pad useful not only for writing, but also for lightweight experimentation.
 
 ### How It Works
-Users will be able to type the command `//code` to insert a code block into the document. Inside the code box, users can write code with proper formatting and then run it from within the app. 
+Users can type `//code` to insert a Python code box into the document. The code box provides Python syntax highlighting and keeps the source code as part of the note. Users can enter and leave the box using the keyboard, then press `Ctrl+Enter` to run the snippet.
 
-The backend can handle code execution through the Tauri/Rust layer, which is better suited for interacting with the local system than the frontend alone.
+The output panel below the code box displays standard output, error output, and the result of the execution. The React frontend manages the editing experience and sends the Python source to the Tauri/Rust backend, which runs it using a locally installed Python interpreter.
 
-The initial plan is to support Python and C++, with the possibility of adding more languages in the future.
+The current implementation supports Python. C++ and other languages may be added in future versions.
 
 ## 5. Tables (11 Jul - 20 Jul)
 The table feature is designed to help users structure information quickly without relying on mouse-heavy table editing tools. This is useful for lecture notes, comparison charts, planning, and lightweight calculations. The goal is to make table editing feel natural inside a keyboard-first note-taking environment.
 
 ### How It Works
-Users will be able to create tables using `//table`. Once a table is created, keyboard actions such as arrow keys, `Tab` and `Enter` can be used to move between cells, add columns or create new rows.
+Users can create a three-column table using `//table`. Once a table is created, the arrow keys, `Tab`, and `Shift+Tab` can be used to move between cells. Pressing `Enter` moves down the current column and creates a new row when the user reaches the bottom of the table.
+
+Tables also support calculations over spreadsheet-style cell ranges. For example, entering `//sum(A1:C3)` inside a table cell and pressing `Enter` replaces the formula with the calculated result. The supported operations are `sum`, `avg`, `mean`, `median`, `min`, `max`, and `count`.
 
 ## 6. Fuzzy Search (21 Jul - 27 Jul)
 This improves the discoverability of commands. Since x2pad depends heavily on typed commands, users should not need to memorise every command exactly. Fuzzy search allows users to type partial or imperfect command names and still find the command they want.
@@ -193,7 +195,7 @@ For example, `//date`, `//time`, and `//wordcount` all use the same command dete
 
 The registry also improves discoverability. Since every command has a description, the same data structure that powers command execution can also power the command menu. This avoids duplicating command names and descriptions in separate parts of the codebase.
 
-Using a registry also prepares x2pad for more advanced commands later. Commands such as `//table`, `//code`, or formula commands can follow the same overall pattern while still having custom behaviour where needed.
+The registry also supports more advanced commands. `//table` and `//code` use the same discovery and selection pathway as other commands, while their specialised editor behaviour is handled separately.
 
 # .x2 Note Format
 The `.x2` file format is the local-first storage format used by x2pad. It allows notes to be saved directly to the user's device while preserving the note text and the formatting ranges applied through the editor.
@@ -269,7 +271,7 @@ The current `.x2` file includes:
 }
 ```
 
-This gives the app a working persistence layer for the current editor features. In future versions, the `.x2` format can be expanded to support richer structured blocks for tables, code boxes, AI-generated content, and additional metadata.
+This gives the app a working persistence layer for the current editor features. Tables and code boxes are already preserved as readable Markdown content, while future `.x2` versions can add richer metadata without changing the current editing model.
 
 # Architecture
 ![architecture](project-docs/architecture.jpg)
@@ -286,10 +288,11 @@ The frontend handles:
 - Rendering the main editor interface
 - Displaying the toolbar, sidebar, command menu, and status bar
 - Managing editor state such as text content, cursor position, and formatting
-- Detecting typed commands such as `//bold`, `//save`, and `\\<prompt>`
+- Detecting typed commands such as `//bold`, `//code`, `//table`, `//save`, and `\\<prompt>`
 - Filtering command suggestions as the user types
 - Applying visual formatting such as bold, italic, underline, strikethrough, font size, and color
-- Sending save, export, and AI requests to the backend when needed
+- Rendering code boxes, code output, and keyboard-operated tables inside CodeMirror
+- Sending AI requests to the Gemini API and native-operation requests to the Rust/Tauri backend
 
 CodeMirror 6 is especially important because it gives x2pad more control than a normal text area. It allows the app to track document changes, command triggers, and formatting behaviour in a more structured way.
 
@@ -303,7 +306,7 @@ The backend handles:
 - Opening existing `.x2` files
 - Exporting notes to other formats such as PDF
 - Accessing the local file system
-- Running local processes for future code execution features
+- Running Python snippets using the interpreter installed on the user's device
 - Handling backend operations that should not be done directly in the frontend
 
 Tauri allows the app to use the operating system's native webview instead of bundling a full browser engine. This helps keep the application smaller and faster than many Electron-based desktop apps.
@@ -328,7 +331,37 @@ Eg. when the user types `//bold`, x2pad recognises the command, removes `//bold`
 
 This design keeps the user in the typing flow because they do not need to stop and search through menus or memorise complex keyboard shortcuts.
 
-## 4. How Saving and Loading Works
+## 4. How Tables Work
+Tables are stored as readable Markdown within the note, while CodeMirror decorations make them appear and behave like structured tables. This allows x2pad to provide a keyboard-friendly table interface without introducing a separate table document format.
+
+The frontend processes a table as follows:
+
+1. The `//table` command handler inserts a Markdown table template into the document.
+2. The table parser identifies its rows, columns, and cell ranges whenever the document changes.
+3. CodeMirror decorations visually distinguish the header, separator, rows, and cells without replacing the underlying text.
+4. A custom keymap translates table navigation into cursor movements and appends a row when navigation continues beyond the final row.
+5. The formula parser validates supported operations and cell ranges, collects numeric values, and replaces a valid formula with its result.
+
+Unlike Python execution, table behaviour does not require the Rust backend because parsing, navigation, and calculations only modify editor content and state. Since the underlying Markdown remains part of the note content, tables are also preserved automatically when the note is saved as an `.x2` file.
+
+## 5. How Code Execution Works
+The code box demonstrates why x2pad separates editor behaviour from native desktop operations. CodeMirror and React provide the interactive editing experience, while Rust handles the operating-system process required to execute Python.
+
+The code execution flow works like this:
+
+1. The user types `//code`, and the frontend replaces the command with a fenced Python code block.
+2. CodeMirror detects the block and applies Python syntax highlighting and code-box decorations.
+3. The user writes or edits the snippet and presses `Ctrl+Enter`.
+4. The frontend identifies the active code box, extracts only its Python source, and calls the Tauri command `run_python_snippet`.
+5. The Rust backend starts the locally installed Python interpreter and sends the source code through standard input.
+6. The backend captures standard output, error output, and the process exit code.
+7. The result is returned to the frontend and displayed in an output panel below the code box.
+
+The backend first attempts to use the Windows Python launcher through `py -3` and then falls back to the `python` command. To prevent a faulty or excessively verbose snippet from running without control, execution is stopped after five seconds and each output stream is limited to 256 KiB. Failures such as an empty code box, unavailable Python installation, runtime error, timeout, or truncated output are returned as controlled messages instead of crashing the editor.
+
+This design keeps process execution outside the browser-based frontend while allowing the result to remain part of the user's writing workflow.
+
+## 6. How Saving and Loading Works
 x2pad uses a local-first saving system based on the `.x2` file format. This allows users to store their notes directly on their own device.
 
 The save flow works like this:
@@ -350,7 +383,7 @@ The loading flow works like this:
 
 This system allows x2pad to preserve both the user's writing and the formatting applied through typed commands.
 
-## 5. How AI Requests Are Handled
+## 7. How AI Requests Are Handled
 The `\\` AI registry is designed to let users request AI assistance without leaving the editor. Unlike a simple chatbot prompt, x2pad can send the user's prompt together with document context so that the AI response is aware of what the user is currently working on.
 
 A typical AI request flow works like this:
@@ -367,9 +400,9 @@ Eg. a user may type: `\\summarise this paragraph`
 
 x2pad can send the prompt together with the current note context to the Gemini API, allowing the generated response to better match the user's existing document.
 
-In future versions, the AI flow can be improved with loading states, streamed responses, error handling, and options for where the AI response should be inserted. For privacy, the app should also make it clear when text or document context is being sent to an external AI service.
+The current interface provides thinking, ready, and error states, and lets the user choose where a response is inserted. Future versions can add streamed responses and clearer privacy information about when note context is sent to an external AI service.
 
-## 6. How PDF Export Works
+## 8. How PDF Export Works
 PDF export is handled through the Rust/Tauri backend because PDF generation is closer to a desktop file operation than a normal frontend rendering task. The frontend already knows the current note title, text content, and style ranges, but the backend is better suited for creating and writing the final PDF file to the user's device.
 
 The PDF export flow works like this:
@@ -386,7 +419,7 @@ The PDF export flow works like this:
 
 This flow shows why x2pad separates editor state from export logic. The editor stores the note in a format that is useful while writing, while the backend transforms that same data into a document format that is useful for sharing or submission.
 
-## 7. How Sidebar and Folder Loading Works
+## 9. How Sidebar and Folder Loading Works
 x2pad also includes a sidebar that behaves like a lightweight local note browser. Instead of opening a single isolated file each time, the app can remember a notes folder and load `.x2` files from that folder into the sidebar.
 
 The folder loading flow works like this:
@@ -402,7 +435,7 @@ This design supports the local-first model of x2pad. Notes remain normal files o
 
 The sidebar also has its own interaction state, such as the current search value, selected sidebar item, active note path, and whether the logo/search pane is being shown. This keeps note navigation separate from the actual editor content.
 
-## 8. State Management Explanation
+## 10. State Management Explanation
 x2pad has several different kinds of state, and they are handled in different places depending on what the state represents.
 
 React state is used for interface-level information such as:
@@ -419,76 +452,42 @@ CodeMirror state is used for editor-specific behaviour such as:
 - keyboard handling;
 - command-line highlighting;
 - AI command highlighting;
-- text style decorations.
+- text style decorations;
+- table and code-box decorations;
+- the selected or actively edited code box;
+- code execution output associated with each code box.
 
 Refs are used for values that need to persist across renders without always causing a full React re-render. For example, style ranges are tracked in refs so the editor can update formatting ranges as text changes, while still allowing those ranges to be saved into the `.x2` file later.
 
-This split is important because x2pad is not just displaying plain text. It has to handle typed commands, formatting ranges, AI insertion, saved style restoration, and sidebar navigation at the same time. Keeping these responsibilities in the correct state layer helps the editor remain responsive and reduces the chance that one interaction accidentally breaks another.
+This split is important because x2pad is not just displaying plain text. It has to handle typed commands, formatting ranges, AI insertion, table navigation, code-box interaction, saved style restoration, and sidebar navigation at the same time. Keeping these responsibilities in the correct state layer helps the editor remain responsive and reduces the chance that one interaction accidentally breaks another.
 
-## 9. Why This Architecture Fits x2pad
+## 11. Why This Architecture Fits x2pad
 This architecture fits x2pad because the app needs both a flexible editor interface and native desktop capabilities.
 
-The frontend is responsible for delivering a smooth writing experience, while the Rust/Tauri backend handles operations that require access to the local system. This separation keeps the editor responsive while still allowing features such as local file saving, exporting, and future code execution.
+The frontend is responsible for delivering a smooth writing experience, while the Rust/Tauri backend handles operations that require access to the local system. This separation keeps the editor responsive while supporting local file saving, PDF export, and Python code execution.
 
 By combining React, CodeMirror, Tauri, and Rust, x2pad can provide the feel of a modern web editor while behaving like a lightweight desktop application.
-
-# Current Milestone Objectives
-For the current milestone, our main objective is to complete the core `//` command registry and begin building the `\\` AI registry
-
-The milestone objectives are:
-- Complete the core `//` command registry
-- Improve the command menu so it filters commands as the user types (not exactly the fuzzy search feature yet)
-- Add note persistence, including saving and loading `.x2` files
-- Refine the editor UI based on prototype testing and user feedback
-
-# Current Milestone Progress
-In this milestone, we completed a usable version of the editor interface. The editor supports continuous typing in a CodeMirror-based writing area, and users can apply formatting or insert content through typed commands from the command registry. The current implemented `//` commands include:
-- `//title` to switch to title-sized text
-- `//header` to switch to header-sized text
-- `//body` to return to body-sized text
-- `//bold` to enable bold text
-- `//italic` to enable italic text
-- `//strike` to enable strikethrough text
-- `//underline` to enable underlined text
-- `//default` to reset text formatting
-- `//size` to adjust the text size [Eg. `//size 16`]
-- `//color` to change the text color [Eg. `//color red`]
-- `//bulletlist` to add bullet points
-- `//numberlist` to start a numbered list
-- `//date` to add the date
-- `//time` to add the time
-- `//wordcount` to insert the current word count
-- `//save` to save the document in .x2 format
-- `//export` to export the document in PDF format
-
-The command menu also filters available commands as the user types, making the keyboard-first workflow easier to discover.
-
-We also worked on the first usable version of the AI engine, using the `\\` command.
 
 # Software Engineering Evidence
 This section explains the software engineering principles that were applied while building x2pad. Instead of only listing features, it shows how the project was structured, why certain design decisions were made, and how the implementation choices support maintainability, reliability, extensibility, and user experience.
 
 ## 1. Separation of Concerns
-x2pad is split into a frontend editor layer and a backend desktop layer. This is one of the most important software engineering decisions in the project because the app needs both a smooth writing interface and access to native operating system features.
+x2pad separates the frontend editor from native desktop operations. The frontend manages CodeMirror state, user interactions, tables, and code-box presentation, while the Rust/Tauri backend handles file operations, PDF generation, settings, and local process execution.
 
-Since the frontend and backend responsibilities were already explained in the architecture section, the important software engineering point here is why the split matters. The frontend focuses on the user's editing experience, while the backend handles operations that require native desktop access. This prevents the editor interface from becoming mixed together with file-system logic, PDF writing, and operating-system configuration.
-
-This separation also prevents the backend from needing to understand React UI state. Each side has a clearer responsibility, which makes the code easier to reason about and easier to extend.
-
-For example, saving a note is not handled entirely inside the React editor. The frontend collects the note data, then calls the backend command `save_x2_note`. The backend then serialises the data and writes the file. This keeps the user interface responsive while also keeping file-system operations inside the layer that is designed to handle them.
+For example, the code-box frontend extracts the active Python source and calls `run_python_snippet`. The Rust backend manages the interpreter, timeout, output streams, and exit code before returning the result for display. This prevents operating-system logic from becoming coupled to the editor and makes both layers easier to maintain and extend.
 
 ## 2. Modular Frontend Structure
 The frontend is organised into separate files for pages, components, styles, and command logic. This supports modularity because each file has a more focused purpose.
 
 Current examples include:
-- `src/pages/Editor.tsx`: contains the main editor workflow, editor state, command detection, note loading, AI interaction, and CodeMirror setup.
+- `src/pages/Editor.tsx`: contains the main editor workflow, editor state, command detection, note loading, AI interaction, table behaviour, code-box presentation, and CodeMirror setup.
 - `src/pages/StartPage.tsx`: contains the starting page of the app.
 - `src/components/ItemsList.tsx` and `src/components/ItemRow.tsx`: separate reusable UI pieces from the page-level logic.
 - `src/CommandRegistry.ts`: stores command definitions separately from the editor page.
 - `src/styles/Editor.css` and `src/styles/StartPage.css`: separate styling from component logic.
-- `src-tauri/src/lib.rs`: contains native commands for persistence, PDF export, folder loading, and settings storage.
+- `src-tauri/src/lib.rs`: contains native commands for persistence, PDF export, folder loading, settings storage, and Python execution.
 
-This is useful because x2pad is expected to grow. Future features such as `//table`, `//code`, formulas, and fuzzy command search would become difficult to maintain if all logic was placed in one large file. By separating features into clearer modules, future changes can be made with less risk of accidentally breaking unrelated behaviour.
+This separation made it possible to add `//table`, table formulas, and `//code` without placing command definitions, visual styling, file operations, and native process execution in the same part of the application. It also prepares the codebase for later features such as fuzzy command search and support for additional programming languages.
 
 ## 3. Central Command Registry
 The command registry is explained in more detail in the Command Registry section. From a software engineering perspective, it is important because it keeps command definitions in one central place instead of scattering command logic throughout the editor.
@@ -527,6 +526,8 @@ For file loading, the Rust backend checks that:
 
 This prevents the app from blindly trusting arbitrary files. If a user accidentally opens the wrong file, the app can reject it cleanly instead of crashing or loading corrupted data.
 
+The Python runner also applies defensive limits to code supplied by the user. It rejects an empty code box, stops a snippet that runs for more than five seconds, limits standard output and error output to 256 KiB per stream, and reports when Python cannot be found. These checks prevent common failures such as infinite loops or uncontrolled output from making the application unresponsive.
+
 Defensive programming is important for x2pad because commands are typed directly into the document. The app must be forgiving when the user types incomplete commands, invalid commands, or command-like text that should not be executed.
 
 ## 6. Local-First Data Ownership
@@ -545,10 +546,11 @@ The `version` field allows the file format to evolve. For example, the current v
 - style ranges
 - saved timestamp
 
-Future versions may need to store:
-- tables
-- code boxes
-- formula cells
+Tables and code boxes currently remain readable within the note content as Markdown tables and fenced Python blocks. This means they can already be saved without adding a second storage representation. Future versions may introduce dedicated structured data for:
+
+- table metadata
+- code-box execution settings or saved output
+- formula metadata
 - AI response metadata
 - embedded command history
 - richer block structures
@@ -568,6 +570,7 @@ Examples include:
 - `load_x2_note_from_path` returns an error if the file is not a valid `.x2` note.
 - `set_note_folder` returns an error if the selected path is not a directory.
 - `export_note_pdf` returns an error if the PDF cannot be created or written.
+- `run_python_snippet` returns an error if the code box is empty or a Python interpreter cannot be started.
 
 This supports reliability because file system operations can fail for many reasons, such as missing permissions, deleted folders, invalid files, or corrupted settings. Instead of assuming everything succeeds, the backend reports failures through a controlled interface.
 
@@ -576,23 +579,50 @@ The main interaction model was designed around the user's typing flow. This is n
 
 The command system avoids forcing users to memorise many shortcuts. Instead, users can type commands in natural text form and use the command menu for guidance.
 
-The AI registry also follows the same principle. Rather than opening a separate chatbot window, the user can type `\\` inside the note, receive a response, and choose where to insert it.
+The AI registry, tables, and code boxes also follow the same principle. Rather than opening separate tools, the user can request AI assistance, structure information, calculate values, or run a Python snippet from inside the note.
 
-This consistency matters because the app's features share a common interaction language. Formatting, saving, exporting, and AI assistance all feel like part of the same editor instead of separate tools bolted together.
+This consistency matters because the app's features share a common interaction language. Formatting, saving, exporting, AI assistance, tables, and code execution all feel like part of the same editor instead of separate tools bolted together.
 
 ## 11. Privacy-Conscious Design
 x2pad stores notes locally and does not require a user account for normal note-taking. This supports the privacy-conscious user story directly.
 
 By saving normal notes as local `.x2` files, the app gives users direct control over where their writing is stored. This is important for users who may be taking personal notes, lecture notes, project notes, or drafts that they do not want locked inside a cloud-only platform.
 
+# Current Milestone Objectives
+For the current milestone, our main objective is to complete the core code-box and table features while preserving x2pad's keyboard-first workflow, and then begin the first round of user testing.
+
+The milestone objectives are:
+
+- Implement `//code` with Python execution and in-editor output
+- Implement `//table` with keyboard navigation, automatic row creation, and formulas
+- Ensure that code boxes and tables can be saved and reopened through the existing `.x2` format
+- Begin the first round of user testing for the new workflows
+
+# Current Milestone Progress
+In this milestone, we completed the main Python code-box and table workflows. Both features build on the existing command registry and allow users to perform more complex tasks without leaving the editor.
+
+For the code-box feature, `//code` now inserts a syntax-highlighted Python block. Users can edit the snippet and run it with `Ctrl+Enter`, after which standard output, errors, and the execution result are displayed below the box. Execution is handled by the Rust/Tauri backend using a locally installed Python interpreter, with a five-second timeout and a 256 KiB limit for each output stream. The current implementation supports Python; C++ execution remains a possible future extension.
+
+For the table feature, `//table` now inserts a styled three-column Markdown table. Users can navigate between cells using the arrow keys, `Tab`, and `Shift+Tab`, while `Enter` moves down the current column and creates a new row when necessary. Tables support spreadsheet-style ranges and the `sum`, `avg`, `mean`, `median`, `min`, `max`, and `count` formula operations.
+
+Both features remain readable within the note content and can be saved and reopened using the existing `.x2` format. With the main implementation work complete, the next activity for this milestone is the planned first round of user testing.
+
 # Next Milestone Objectives
-For the next milestone, we plan to implement the `//code` and `//table` features.
+For the next milestone, our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
 
 The next milestone objectives are:
-- Implement a fully functional `//table` command
-- Add table formulas such as SUM, AVERAGE, MIN, MAX, and COUNT
-- Implement a fully functional `//code` command
-- Add code boxes that can run at least Python and C++ snippets
+
+- Improve the current Markdown-based table presentation so that tables look and behave more like structured document tables
+- Add clearer controls for managing table rows and columns while preserving keyboard-first navigation and formulas
+- Add C++ execution to the code box
+- Allow users to select or identify the programming language used by each code box
+- Improve PDF export so that tables are rendered as formatted tables instead of raw Markdown
+- Improve PDF export so that code boxes preserve code formatting and clearly display their output
+- Use feedback from the first round of user testing to refine table editing, code-box interaction, and export quality
+- Investigate a managed AI access system so that users do not need to obtain and configure their own Gemini API key
+- Design usage tracking, quotas, secure API-key handling, and cost controls for the managed AI system before making it available to users
+
+The managed AI access system is an exploratory objective because it would require additional backend infrastructure and careful handling of security, privacy, abuse prevention, and API costs. The initial goal is to evaluate and prototype a safe approach rather than immediately replacing the current user-provided API-key system.
 
 # Challenges Faced
 1. Balancing keyboard-first design with discoverability
