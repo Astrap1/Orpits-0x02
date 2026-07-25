@@ -1,5 +1,6 @@
 use printpdf::{
-    BuiltinFont, Color, IndirectFontRef, Line, Mm, PdfDocument, PdfLayerReference, Point, Rgb,
+    BuiltinFont, Color, IndirectFontRef, Line, Mm, PdfDocument, PdfDocumentReference,
+    PdfLayerReference, Point, Rgb,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 const X2_FORMAT: &str = "x2pad.note";
-const X2_VERSION: u8 = 1;
+const X2_VERSION: u8 = 2;
 const PDF_PAGE_WIDTH_MM: f32 = 210.0;
 const PDF_PAGE_HEIGHT_MM: f32 = 297.0;
 const PDF_MARGIN_MM: f32 = 18.0;
@@ -32,6 +33,8 @@ struct NotePayload {
     content: String,
     #[serde(default)]
     styles: Vec<TextStyleRange>,
+    #[serde(default)]
+    tables: Vec<X2Table>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -82,6 +85,22 @@ struct TextStyleRange {
     style: TextStyle,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct X2TableCell {
+    text: String,
+    #[serde(default)]
+    styles: Vec<TextStyleRange>,
+    #[serde(rename = "activeStyle", default)]
+    active_style: Option<TextStyle>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct X2Table {
+    id: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<X2TableCell>>,
+}
+
 #[derive(Serialize)]
 struct X2NoteFile<'a> {
     format: &'static str,
@@ -89,6 +108,7 @@ struct X2NoteFile<'a> {
     title: &'a str,
     content: &'a str,
     styles: &'a [TextStyleRange],
+    tables: &'a [X2Table],
     #[serde(rename = "savedAt")]
     saved_at: &'a str,
 }
@@ -101,6 +121,8 @@ struct X2NoteFileOwned {
     content: String,
     #[serde(default)]
     styles: Vec<TextStyleRange>,
+    #[serde(default)]
+    tables: Vec<X2Table>,
     #[serde(rename = "savedAt")]
     saved_at: String,
 }
@@ -110,6 +132,7 @@ struct LoadedX2Note {
     title: String,
     content: String,
     styles: Vec<TextStyleRange>,
+    tables: Vec<X2Table>,
     #[serde(rename = "savedAt")]
     saved_at: String,
     path: String,
@@ -152,6 +175,7 @@ fn save_x2_note(app: AppHandle, path: String, note: NotePayload) -> Result<(), S
         title: note.title.trim(),
         content: &note.content,
         styles: &note.styles,
+        tables: &note.tables,
         saved_at: &saved_at,
     };
 
@@ -267,24 +291,15 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
     );
     cursor_y -= PDF_BODY_LINE_HEIGHT_MM * 2.0;
 
-    for styled_line in build_styled_pdf_lines(&note.content, &note.styles) {
-        if styled_line.is_empty() {
-            cursor_y -= PDF_BODY_LINE_HEIGHT_MM;
-            continue;
-        }
-
-        for line in wrap_styled_pdf_line(&styled_line, PDF_BODY_MAX_WIDTH_MM) {
-            if cursor_y < PDF_MARGIN_MM {
-                let (page, layer) =
-                    document.add_page(Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), "Layer");
-                current_layer = document.get_page(page).get_layer(layer);
-                cursor_y = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM;
-            }
-
-            cursor_y =
-                write_styled_pdf_line(&current_layer, &line, PDF_MARGIN_MM, cursor_y, &fonts);
-        }
-    }
+    write_pdf_note_body(
+        &document,
+        &mut current_layer,
+        &mut cursor_y,
+        &note.content,
+        &note.styles,
+        &note.tables,
+        &fonts,
+    );
 
     let output =
         File::create(path).map_err(|error| format!("Could not create PDF file: {error}"))?;
@@ -651,7 +666,7 @@ fn load_x2_note_from_path(path: &Path) -> Result<LoadedX2Note, String> {
         return Err("This file is not an x2pad note.".to_string());
     }
 
-    if parsed.version != X2_VERSION {
+    if parsed.version == 0 || parsed.version > X2_VERSION {
         return Err(format!(
             "Unsupported .x2 version {}. This app supports version {}.",
             parsed.version, X2_VERSION
@@ -662,6 +677,7 @@ fn load_x2_note_from_path(path: &Path) -> Result<LoadedX2Note, String> {
         title: parsed.title,
         content: parsed.content,
         styles: parsed.styles,
+        tables: parsed.tables,
         saved_at: parsed.saved_at,
         path: path.to_string_lossy().to_string(),
     })
@@ -679,6 +695,247 @@ where
     I: IntoIterator<Item = String>,
 {
     args.into_iter().find(|argument| is_x2_path(argument))
+}
+
+fn write_pdf_note_body(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+    content: &str,
+    styles: &[TextStyleRange],
+    tables: &[X2Table],
+    fonts: &PdfFonts,
+) {
+    let mut cursor = 0;
+
+    while let Some((from, to, table_id)) = find_next_table_anchor(content, cursor) {
+        write_pdf_text_block(
+            document,
+            current_layer,
+            cursor_y,
+            &content[cursor..from],
+            &styles_for_content_range(content, styles, cursor, from),
+            fonts,
+        );
+
+        if let Some(table) = tables.iter().find(|candidate| candidate.id == table_id) {
+            write_pdf_table(document, current_layer, cursor_y, table, fonts);
+        } else {
+            write_pdf_text_block(
+                document,
+                current_layer,
+                cursor_y,
+                &content[from..to],
+                &[],
+                fonts,
+            );
+        }
+
+        cursor = to;
+    }
+
+    write_pdf_text_block(
+        document,
+        current_layer,
+        cursor_y,
+        &content[cursor..],
+        &styles_for_content_range(content, styles, cursor, content.len()),
+        fonts,
+    );
+}
+
+fn find_next_table_anchor(content: &str, start: usize) -> Option<(usize, usize, String)> {
+    let relative_from = content[start..].find("[[x2-table:")?;
+    let from = start + relative_from;
+    let id_from = from + "[[x2-table:".len();
+    let relative_to = content[id_from..].find("]]")?;
+    let to = id_from + relative_to + 2;
+    let id = content[id_from..id_from + relative_to].to_string();
+
+    if id.trim().is_empty() {
+        return None;
+    }
+
+    Some((from, to, id))
+}
+
+fn styles_for_content_range(
+    content: &str,
+    styles: &[TextStyleRange],
+    byte_from: usize,
+    byte_to: usize,
+) -> Vec<TextStyleRange> {
+    let code_unit_from = content[..byte_from].chars().map(char::len_utf16).sum::<usize>();
+    let code_unit_to = content[..byte_to].chars().map(char::len_utf16).sum::<usize>();
+
+    styles
+        .iter()
+        .filter_map(|range| {
+            let from = range.from.max(code_unit_from);
+            let to = range.to.min(code_unit_to);
+
+            if from >= to {
+                return None;
+            }
+
+            Some(TextStyleRange {
+                from: from - code_unit_from,
+                to: to - code_unit_from,
+                style: range.style.clone(),
+            })
+        })
+        .collect()
+}
+
+fn write_pdf_text_block(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+    content: &str,
+    styles: &[TextStyleRange],
+    fonts: &PdfFonts,
+) {
+    for styled_line in build_styled_pdf_lines(content, styles) {
+        if styled_line.is_empty() {
+            *cursor_y -= PDF_BODY_LINE_HEIGHT_MM;
+            continue;
+        }
+
+        for line in wrap_styled_pdf_line(&styled_line, PDF_BODY_MAX_WIDTH_MM) {
+            ensure_pdf_space(document, current_layer, cursor_y, PDF_BODY_LINE_HEIGHT_MM);
+            *cursor_y =
+                write_styled_pdf_line(current_layer, &line, PDF_MARGIN_MM, *cursor_y, fonts);
+        }
+    }
+}
+
+fn write_pdf_table(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+    table: &X2Table,
+    fonts: &PdfFonts,
+) {
+    let column_count = table.columns.len().max(1);
+    let column_width = PDF_BODY_MAX_WIDTH_MM / column_count as f32;
+    let row_height = 9.0;
+    let table_width = column_width * column_count as f32;
+
+    *cursor_y -= 2.0;
+    ensure_pdf_space(document, current_layer, cursor_y, row_height);
+    write_pdf_table_row(
+        current_layer,
+        PDF_MARGIN_MM,
+        *cursor_y,
+        row_height,
+        table_width,
+        column_width,
+        column_count,
+        &table
+            .columns
+            .iter()
+            .map(|column| X2TableCell {
+                text: column.clone(),
+                styles: vec![TextStyleRange {
+                    from: 0,
+                    to: column.chars().map(char::len_utf16).sum(),
+                    style: TextStyle {
+                        is_bold: true,
+                        ..TextStyle::default()
+                    },
+                }],
+                active_style: None,
+            })
+            .collect::<Vec<_>>(),
+        fonts,
+    );
+    *cursor_y -= row_height;
+
+    for row in &table.rows {
+        ensure_pdf_space(document, current_layer, cursor_y, row_height);
+        write_pdf_table_row(
+            current_layer,
+            PDF_MARGIN_MM,
+            *cursor_y,
+            row_height,
+            table_width,
+            column_width,
+            column_count,
+            row,
+            fonts,
+        );
+        *cursor_y -= row_height;
+    }
+
+    *cursor_y -= 3.0;
+}
+
+fn write_pdf_table_row(
+    layer: &PdfLayerReference,
+    x: f32,
+    y: f32,
+    row_height: f32,
+    table_width: f32,
+    column_width: f32,
+    column_count: usize,
+    cells: &[X2TableCell],
+    fonts: &PdfFonts,
+) {
+    layer.set_outline_color(Color::Rgb(Rgb::new(0.72, 0.74, 0.78, None)));
+    layer.set_outline_thickness(0.45);
+
+    for index in 0..=column_count {
+        let column_x = x + column_width * index as f32;
+        layer.add_line(Line {
+            points: vec![
+                (Point::new(Mm(column_x), Mm(y)), false),
+                (Point::new(Mm(column_x), Mm(y - row_height)), false),
+            ],
+            is_closed: false,
+        });
+    }
+
+    for row_y in [y, y - row_height] {
+        layer.add_line(Line {
+            points: vec![
+                (Point::new(Mm(x), Mm(row_y)), false),
+                (Point::new(Mm(x + table_width), Mm(row_y)), false),
+            ],
+            is_closed: false,
+        });
+    }
+
+    for (index, cell) in cells.iter().enumerate() {
+        let cell_x = x + column_width * index as f32 + 2.0;
+        let max_text_width = (column_width - 4.0).max(8.0);
+        let line = wrap_styled_pdf_line(
+            &build_styled_pdf_lines(&cell.text, &cell.styles)
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+            max_text_width,
+        )
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+
+        write_styled_pdf_line(layer, &line, cell_x, y - 5.8, fonts);
+    }
+}
+
+fn ensure_pdf_space(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+    needed_height: f32,
+) {
+    if *cursor_y - needed_height >= PDF_MARGIN_MM {
+        return;
+    }
+
+    let (page, layer) = document.add_page(Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), "Layer");
+    *current_layer = document.get_page(page).get_layer(layer);
+    *cursor_y = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM;
 }
 
 fn build_styled_pdf_lines(content: &str, styles: &[TextStyleRange]) -> Vec<Vec<StyledTextSegment>> {

@@ -94,6 +94,7 @@ interface LoadedX2Note {
   savedAt: string;
   path: string;
   styles?: TextStyleRange[];
+  tables?: StructuredTable[];
 }
 
 interface LoadedX2Folder {
@@ -150,6 +151,24 @@ interface TableBlock {
   cells: TableCell[];
 }
 
+interface StructuredTableCell {
+  text: string;
+  styles?: TextStyleRange[];
+  activeStyle?: ActiveTextStyle;
+}
+
+interface StructuredTable {
+  id: string;
+  columns: string[];
+  rows: StructuredTableCell[][];
+}
+
+interface StructuredTableCellTarget {
+  tableId: string;
+  rowIndex: number;
+  columnIndex: number;
+}
+
 interface PendingStyleRestore {
   content: string;
   styles: TextStyleRange[];
@@ -162,6 +181,11 @@ const addTextStyleDecoration = StateEffect.define<{
 }>();
 
 const replaceTextStyleDecorations = StateEffect.define<TextStyleRange[]>();
+
+const STRUCTURED_TABLE_ANCHOR_PATTERN = /\[\[x2-table:([a-zA-Z0-9_-]+)\]\]/g;
+const TABLE_WIDGET_INPUT_EVENT = "x2pad-table-cell-input";
+const TABLE_WIDGET_KEY_EVENT = "x2pad-table-cell-key";
+const TABLE_WIDGET_FOCUS_EVENT = "x2pad-table-cell-focus";
 
 const getResolvedColor = (color: string) => colorValues[color] ?? color;
 
@@ -272,6 +296,295 @@ const textStyleDecorations = StateField.define<DecorationSet>({
   },
   provide: (field) => EditorView.decorations.from(field)
 });
+
+function getSelectionOffsetWithin(element: HTMLElement) {
+  const selection = window.getSelection();
+
+  if (!selection || selection.rangeCount === 0) {
+    const textLength = element.textContent?.length ?? 0;
+    return { from: textLength, to: textLength };
+  }
+
+  const range = selection.getRangeAt(0);
+
+  if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) {
+    const textLength = element.textContent?.length ?? 0;
+    return { from: textLength, to: textLength };
+  }
+
+  const getOffset = (container: Node, offset: number) => {
+    const measure = document.createRange();
+    measure.selectNodeContents(element);
+    measure.setEnd(container, offset);
+    return measure.toString().length;
+  };
+  const from = getOffset(range.startContainer, range.startOffset);
+  const to = getOffset(range.endContainer, range.endOffset);
+
+  return {
+    from: Math.min(from, to),
+    to: Math.max(from, to)
+  };
+}
+
+function dispatchTableWidgetEvent(name: string, detail: Record<string, unknown>) {
+  document.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+function getStructuredTableCellSelector(target: StructuredTableCellTarget) {
+  return [
+    `.structured-table-cell-editor[data-table-id="${target.tableId}"]`,
+    `[data-row-index="${target.rowIndex}"]`,
+    `[data-column-index="${target.columnIndex}"]`
+  ].join("");
+}
+
+function placeCaretAtEnd(element: HTMLElement) {
+  const selection = window.getSelection();
+  const range = document.createRange();
+
+  range.selectNodeContents(element);
+  range.collapse(false);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
+  let attempts = 0;
+
+  const focusCell = () => {
+    attempts += 1;
+    const element = document.querySelector<HTMLElement>(getStructuredTableCellSelector(target));
+
+    if (element) {
+      element.focus();
+      placeCaretAtEnd(element);
+    }
+
+    if (attempts < 12) {
+      window.setTimeout(() => requestAnimationFrame(focusCell), 16);
+    }
+  };
+
+  requestAnimationFrame(focusCell);
+}
+
+function getStructuredTableCellCommand(text: string) {
+  const formulaCommand = text.match(/\/\/(sum|avg|mean|min|max|count)\(([A-Z]+\d+:[A-Z]+\d+)\)\s*$/i);
+
+  if (formulaCommand) {
+    return {
+      name: formulaCommand[1].toLowerCase(),
+      argument: formulaCommand[2],
+      length: formulaCommand[0].length
+    };
+  }
+
+  const spacedCommand = text.match(/\/\/([a-z]+)(?:\s+([^\s]+))?\s*$/i);
+
+  if (!spacedCommand) {
+    return null;
+  }
+
+  return {
+    name: spacedCommand[1].toLowerCase(),
+    argument: spacedCommand[2] ?? "",
+    length: spacedCommand[0].length
+  };
+}
+
+function createStructuredTableCellElement(tableId: string, rowIndex: number, columnIndex: number, cell: StructuredTableCell) {
+  const cellElement = document.createElement("td");
+  const editor = document.createElement("div");
+
+  editor.className = "structured-table-cell-editor";
+  editor.contentEditable = "true";
+  editor.spellcheck = false;
+  editor.dataset.tableId = tableId;
+  editor.dataset.rowIndex = String(rowIndex);
+  editor.dataset.columnIndex = String(columnIndex);
+  editor.setAttribute("role", "textbox");
+  editor.setAttribute("aria-label", `Table cell ${rowIndex + 1}, ${columnIndex + 1}`);
+  editor.setAttribute("style", getTextStyleAttribute(cell.activeStyle ?? defaultTextStyle));
+  appendStyledText(editor, cell.text, cell.styles ?? []);
+
+  editor.addEventListener("focus", () => {
+    dispatchTableWidgetEvent(TABLE_WIDGET_FOCUS_EVENT, { tableId, rowIndex, columnIndex });
+  });
+  editor.addEventListener("input", () => {
+    dispatchTableWidgetEvent(TABLE_WIDGET_INPUT_EVENT, {
+      tableId,
+      rowIndex,
+      columnIndex,
+      text: editor.textContent ?? ""
+    });
+  });
+  editor.addEventListener("keydown", (event) => {
+    const command = getStructuredTableCellCommand(editor.textContent ?? "");
+
+    if (
+      event.key === "Tab" ||
+      event.key === "Enter" ||
+      (event.key.toLowerCase() === "tab" && event.ctrlKey) ||
+      (event.key === "Enter" && command)
+    ) {
+      event.preventDefault();
+      dispatchTableWidgetEvent(TABLE_WIDGET_KEY_EVENT, {
+        tableId,
+        rowIndex,
+        columnIndex,
+        key: event.key,
+        shiftKey: event.shiftKey,
+        ctrlKey: event.ctrlKey || event.metaKey,
+        commandName: command?.name ?? "",
+        commandArgument: command?.argument ?? "",
+        commandLength: command?.length ?? 0,
+        selection: getSelectionOffsetWithin(editor)
+      });
+    }
+  });
+
+  cellElement.append(editor);
+  return cellElement;
+}
+
+class StructuredTableWidget extends WidgetType {
+  constructor(private readonly table: StructuredTable) {
+    super();
+  }
+
+  eq(widget: StructuredTableWidget) {
+    return JSON.stringify(widget.table) === JSON.stringify(this.table);
+  }
+
+  toDOM() {
+    const wrapper = document.createElement("div");
+    const tableElement = document.createElement("table");
+
+    wrapper.className = "structured-table-widget";
+    wrapper.contentEditable = "false";
+    tableElement.className = "structured-table";
+
+    const thead = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+
+    this.table.columns.forEach((column, columnIndex) => {
+      const header = document.createElement("th");
+      const headerEditor = document.createElement("div");
+
+      headerEditor.className = "structured-table-cell-editor structured-table-header-editor";
+      headerEditor.contentEditable = "true";
+      headerEditor.spellcheck = false;
+      headerEditor.textContent = column;
+      headerEditor.dataset.tableId = this.table.id;
+      headerEditor.dataset.rowIndex = "-1";
+      headerEditor.dataset.columnIndex = String(columnIndex);
+      headerEditor.setAttribute("role", "textbox");
+      headerEditor.setAttribute("aria-label", `Table header ${columnIndex + 1}`);
+      headerEditor.addEventListener("input", () => {
+        dispatchTableWidgetEvent(TABLE_WIDGET_INPUT_EVENT, {
+          tableId: this.table.id,
+          rowIndex: -1,
+          columnIndex,
+          text: headerEditor.textContent ?? ""
+        });
+      });
+      headerEditor.addEventListener("focus", () => {
+        dispatchTableWidgetEvent(TABLE_WIDGET_FOCUS_EVENT, {
+          tableId: this.table.id,
+          rowIndex: -1,
+          columnIndex
+        });
+      });
+      headerEditor.addEventListener("keydown", (event) => {
+        if (event.key === "Tab" || event.key === "Enter") {
+          event.preventDefault();
+          dispatchTableWidgetEvent(TABLE_WIDGET_KEY_EVENT, {
+            tableId: this.table.id,
+            rowIndex: -1,
+            columnIndex,
+            key: event.key,
+            shiftKey: event.shiftKey,
+            ctrlKey: event.ctrlKey || event.metaKey,
+            commandName: "",
+            commandArgument: "",
+            commandLength: 0,
+            selection: getSelectionOffsetWithin(headerEditor)
+          });
+        }
+      });
+
+      header.append(headerEditor);
+      headerRow.append(header);
+    });
+
+    thead.append(headerRow);
+    tableElement.append(thead);
+
+    const tbody = document.createElement("tbody");
+    this.table.rows.forEach((row, rowIndex) => {
+      const rowElement = document.createElement("tr");
+
+      this.table.columns.forEach((_, columnIndex) => {
+        rowElement.append(createStructuredTableCellElement(
+          this.table.id,
+          rowIndex,
+          columnIndex,
+          row[columnIndex] ?? { text: "", styles: [] }
+        ));
+      });
+
+      tbody.append(rowElement);
+    });
+    tableElement.append(tbody);
+    wrapper.append(tableElement);
+    return wrapper;
+  }
+
+  ignoreEvent(event: Event) {
+    return event.type !== "blur";
+  }
+}
+
+function buildStructuredTableDecorations(doc: Text, tables: StructuredTable[]) {
+  const builder = new RangeSetBuilder<Decoration>();
+  const tableById = new Map(tables.map((table) => [table.id, table]));
+  const text = doc.toString();
+
+  for (const match of text.matchAll(STRUCTURED_TABLE_ANCHOR_PATTERN)) {
+    const id = match[1];
+    const table = tableById.get(id);
+    const from = match.index ?? 0;
+    const to = from + match[0].length;
+
+    if (!table) {
+      continue;
+    }
+
+    builder.add(from, to, Decoration.replace({
+      widget: new StructuredTableWidget(table),
+      block: true
+    }));
+  }
+
+  return builder.finish();
+}
+
+function structuredTableDecorations(tables: StructuredTable[]) {
+  return StateField.define<DecorationSet>({
+    create(state) {
+      return buildStructuredTableDecorations(state.doc, tables);
+    },
+    update(decorations, transaction) {
+      if (transaction.docChanged) {
+        return buildStructuredTableDecorations(transaction.state.doc, tables);
+      }
+
+      return decorations.map(transaction.changes);
+    },
+    provide: (field) => EditorView.decorations.from(field)
+  });
+}
 
 function removeTextRangeFromStyleRanges(ranges: TextStyleRange[], from: number, to: number) {
   const removedLength = to - from;
@@ -621,6 +934,49 @@ function buildTableDecorations(doc: Text) {
     });
 
   return builder.finish();
+}
+
+function appendStyledText(parent: HTMLElement, text: string, styles: TextStyleRange[]) {
+  if (!text) {
+    parent.append(document.createTextNode(""));
+    return;
+  }
+
+  let index = 0;
+
+  while (index < text.length) {
+    const style = styles
+      .filter((range) => range.from <= index && index < range.to)
+      .slice(-1)[0]?.style ?? defaultTextStyle;
+    let nextIndex = index + 1;
+
+    while (nextIndex < text.length) {
+      const nextStyle = styles
+        .filter((range) => range.from <= nextIndex && nextIndex < range.to)
+        .slice(-1)[0]?.style ?? defaultTextStyle;
+
+      if (!isSameActiveTextStyle(style, nextStyle)) {
+        break;
+      }
+
+      nextIndex += 1;
+    }
+
+    const span = document.createElement("span");
+    span.textContent = text.slice(index, nextIndex);
+    span.setAttribute("style", getTextStyleAttribute(style));
+    parent.append(span);
+    index = nextIndex;
+  }
+}
+
+function isSameActiveTextStyle(left: ActiveTextStyle, right: ActiveTextStyle) {
+  return left.fontSize === right.fontSize &&
+    left.textColor === right.textColor &&
+    left.isBold === right.isBold &&
+    left.isItalic === right.isItalic &&
+    left.isStrike === right.isStrike &&
+    left.isUnderline === right.isUnderline;
 }
 
 const tableDecorations = StateField.define<DecorationSet>({
@@ -1604,6 +1960,15 @@ function moveTableCellAtHorizontalBoundary(view: EditorView, direction: "left" |
   return false;
 }
 
+const legacyMarkdownTableImplementation = {
+  tableDecorations,
+  normalizeTableAndKeepCursor,
+  tableWasChanged,
+  moveTableCellOrAddRow,
+  addTableColumnAfter,
+  moveTableCellAtHorizontalBoundary
+};
+
 function columnLettersToIndex(letters: string) {
   return letters.toUpperCase().split("").reduce((total, letter) => (
     total * 26 + letter.charCodeAt(0) - 64
@@ -1624,6 +1989,103 @@ function parseTableFormula(text: string) {
     toColumn: columnLettersToIndex(match[4]),
     toRow: Number(match[5]) - 1
   };
+}
+
+function parseStructuredTableFormula(commandName: string, commandArgument: string) {
+  const operation = commandName.toLowerCase();
+
+  if (!["sum", "avg", "mean", "median", "min", "max", "count"].includes(operation)) {
+    return null;
+  }
+
+  const match = commandArgument.match(/^\(?([A-Z]+)(\d+):([A-Z]+)(\d+)\)?$/i);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    operation,
+    fromColumn: columnLettersToIndex(match[1]),
+    fromRow: Number(match[2]) - 1,
+    toColumn: columnLettersToIndex(match[3]),
+    toRow: Number(match[4]) - 1
+  };
+}
+
+function evaluateStructuredTableFormula(
+  table: StructuredTable,
+  formula: NonNullable<ReturnType<typeof parseStructuredTableFormula>>
+) {
+  const normalizedTable = normalizeStructuredTable(table);
+  const fromRow = Math.min(formula.fromRow, formula.toRow);
+  const toRow = Math.max(formula.fromRow, formula.toRow);
+  const fromColumn = Math.min(formula.fromColumn, formula.toColumn);
+  const toColumn = Math.max(formula.fromColumn, formula.toColumn);
+  const values: number[] = [];
+
+  if (
+    fromRow < 0 ||
+    fromColumn < 0 ||
+    toRow >= normalizedTable.rows.length ||
+    toColumn >= normalizedTable.columns.length
+  ) {
+    return null;
+  }
+
+  for (let rowIndex = fromRow; rowIndex <= toRow; rowIndex += 1) {
+    for (let columnIndex = fromColumn; columnIndex <= toColumn; columnIndex += 1) {
+      const value = Number(normalizedTable.rows[rowIndex]?.[columnIndex]?.text.trim().replace(/,/g, ""));
+
+      if (Number.isFinite(value)) {
+        values.push(value);
+      }
+    }
+  }
+
+  if (values.length === 0) {
+    return null;
+  }
+
+  if (formula.operation === "count") {
+    return String(values.length);
+  }
+
+  if (formula.operation === "sum") {
+    return String(values.reduce((total, value) => total + value, 0));
+  }
+
+  if (formula.operation === "avg" || formula.operation === "mean") {
+    return String(values.reduce((total, value) => total + value, 0) / values.length);
+  }
+
+  if (formula.operation === "min") {
+    return String(Math.min(...values));
+  }
+
+  if (formula.operation === "max") {
+    return String(Math.max(...values));
+  }
+
+  const sortedValues = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sortedValues.length / 2);
+
+  return sortedValues.length % 2 === 0
+    ? String((sortedValues[middle - 1] + sortedValues[middle]) / 2)
+    : String(sortedValues[middle]);
+}
+
+function normalizeStructuredTable(table: StructuredTable): StructuredTable {
+  return {
+    ...table,
+    rows: table.rows.map((row) => (
+      table.columns.map((_, columnIndex) => row[columnIndex] ?? { text: "", styles: [] })
+    ))
+  };
+}
+
+function normalizeStructuredTables(tables: StructuredTable[]) {
+  return tables.map(normalizeStructuredTable);
 }
 
 function evaluateTableFormula(table: TableBlock, formula: NonNullable<ReturnType<typeof parseTableFormula>>) {
@@ -2092,6 +2554,8 @@ function WindowControls() {
 }
 
 function Editor() {
+  void legacyMarkdownTableImplementation;
+
   const sidebarRef = useRef<HTMLElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
@@ -2099,6 +2563,8 @@ function Editor() {
   const styleRangesRef = useRef<TextStyleRange[]>([]);
   const forcedStyleRangesRef = useRef<TextStyleRange[] | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
+  const activeStructuredCellRef = useRef<StructuredTableCellTarget | null>(null);
+  const structuredTablesRef = useRef<StructuredTable[]>([]);
 
   const [openedNoteTitle, setOpenedNoteTitle] = useState<string | null>(null);
   const [openedNotePath, setOpenedNotePath] = useState<string | null>(null);
@@ -2125,6 +2591,8 @@ function Editor() {
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
   const [aiSession, setAiSession] = useState<AiSession | null>(null);
   const [codeRuns, setCodeRuns] = useState<CodeBoxOutput[]>([]);
+  const [structuredTables, setStructuredTables] = useState<StructuredTable[]>([]);
+  const [tableRenderRevision, setTableRenderRevision] = useState(0);
 
   const [selectedFont, setSelectedFont] = useState("Body");
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
@@ -2193,6 +2661,10 @@ function Editor() {
     setOpenedNoteTitle(note.title || "Untitled Note");
     setOpenedNotePath(note.path);
     setValue(note.content);
+    const loadedTables = normalizeStructuredTables(note.tables ?? []);
+    structuredTablesRef.current = loadedTables;
+    setStructuredTables(loadedTables);
+    setTableRenderRevision((revision) => revision + 1);
     setCodeRuns([]);
     setShowLogoPane(false);
     setShowCommands(false);
@@ -2218,11 +2690,12 @@ function Editor() {
             ...note,
             title: openedNoteTitle || note.title,
             content: value,
-            styles: currentStyles
+            styles: currentStyles,
+            tables: structuredTables
           }
         : note
     )));
-  }, [openedNotePath, openedNoteTitle, value]);
+  }, [openedNotePath, openedNoteTitle, structuredTables, value]);
 
   const activateOpenedNote = useCallback((path: string) => {
     const targetPathKey = getPathKey(path);
@@ -2257,6 +2730,9 @@ function Editor() {
         styles: []
       };
       setValue("");
+      structuredTablesRef.current = [];
+      setStructuredTables([]);
+      setTableRenderRevision((revision) => revision + 1);
       setCodeRuns([]);
       setShowLogoPane(true);
       setShowCommands(false);
@@ -2360,12 +2836,217 @@ function Editor() {
     return window.localStorage.getItem(BROWSER_GEMINI_API_KEY_STORAGE_KEY)?.trim() ?? "";
   }, []);
 
+  const updateStructuredCell = useCallback((
+    tableId: string,
+    rowIndex: number,
+    columnIndex: number,
+    updater: (cell: StructuredTableCell) => StructuredTableCell
+  ) => {
+    const nextTables = normalizeStructuredTables(structuredTablesRef.current.map((table) => {
+      if (table.id !== tableId) {
+        return table;
+      }
+
+      if (rowIndex < 0) {
+        return {
+          ...table,
+          columns: table.columns.map((column, index) => (
+            index === columnIndex ? updater({ text: column, styles: [] }).text : column
+          ))
+        };
+      }
+
+      return {
+        ...table,
+        rows: table.rows.map((row, currentRowIndex) => (
+          currentRowIndex === rowIndex
+            ? row.map((cell, currentColumnIndex) => (
+                currentColumnIndex === columnIndex ? updater(cell) : cell
+              ))
+            : row
+        ))
+      };
+    }));
+
+    structuredTablesRef.current = nextTables;
+    setStructuredTables(nextTables);
+  }, []);
+
+  const moveStructuredTableCell = useCallback((target: StructuredTableCellTarget) => {
+    activeStructuredCellRef.current = target;
+    scheduleStructuredCellFocus(target);
+  }, []);
+
+  const addStructuredTableColumn = useCallback((tableId: string, afterColumnIndex: number, rowIndex: number) => {
+    const nextTables = normalizeStructuredTables(structuredTablesRef.current.map((table) => {
+      if (table.id !== tableId) {
+        return table;
+      }
+
+      const insertIndex = Math.max(0, Math.min(afterColumnIndex + 1, table.columns.length));
+
+      return {
+        ...table,
+        columns: [
+          ...table.columns.slice(0, insertIndex),
+          "New Column",
+          ...table.columns.slice(insertIndex)
+        ],
+        rows: table.rows.map((row) => [
+          ...row.slice(0, insertIndex),
+          { text: "", styles: [] },
+          ...row.slice(insertIndex)
+        ])
+      };
+    }));
+
+    structuredTablesRef.current = nextTables;
+    setStructuredTables(nextTables);
+    setTableRenderRevision((revision) => revision + 1);
+    moveStructuredTableCell({ tableId, rowIndex: Math.max(0, rowIndex), columnIndex: afterColumnIndex + 1 });
+  }, [moveStructuredTableCell]);
+
+  const addStructuredTableRow = useCallback((tableId: string, columnIndex: number) => {
+    let nextRowIndex = 0;
+
+    const nextTables = normalizeStructuredTables(structuredTablesRef.current.map((table) => {
+      if (table.id !== tableId) {
+        return table;
+      }
+
+      nextRowIndex = table.rows.length;
+      return {
+        ...table,
+        rows: [
+          ...table.rows,
+          table.columns.map(() => ({ text: "", styles: [] }))
+        ]
+      };
+    }));
+
+    structuredTablesRef.current = nextTables;
+    setStructuredTables(nextTables);
+    setTableRenderRevision((revision) => revision + 1);
+    moveStructuredTableCell({ tableId, rowIndex: nextRowIndex, columnIndex });
+  }, [moveStructuredTableCell]);
+
+  const getCellStyleForCommand = useCallback((
+    commandName: string,
+    commandArgument: string,
+    currentStyle: ActiveTextStyle
+  ): ActiveTextStyle | null => {
+    const nextStyle = { ...currentStyle };
+
+    if (commandName === "bold") nextStyle.isBold = true;
+    else if (commandName === "italic") nextStyle.isItalic = true;
+    else if (commandName === "strike") nextStyle.isStrike = true;
+    else if (commandName === "underline") nextStyle.isUnderline = true;
+    else if (commandName === "title") {
+      nextStyle.fontSize = "24";
+      nextStyle.isBold = true;
+    } else if (commandName === "header") {
+      nextStyle.fontSize = "18";
+      nextStyle.isBold = true;
+    } else if (commandName === "body") {
+      nextStyle.fontSize = DEFAULT_FONT_SIZE;
+    } else if (commandName === "default") {
+      return defaultTextStyle;
+    } else if (commandName === "color" && commandArgument) {
+      nextStyle.textColor = commandArgument;
+    } else if (commandName === "size" && commandArgument && /^\d+$/.test(commandArgument)) {
+      nextStyle.fontSize = commandArgument;
+    } else {
+      return null;
+    }
+
+    return nextStyle;
+  }, []);
+
+  const runStructuredTableCellCommand = useCallback((
+    tableId: string,
+    rowIndex: number,
+    columnIndex: number,
+    commandName: string,
+    commandArgument: string,
+    commandLength: number,
+    selection: { from: number; to: number }
+  ) => {
+    const table = structuredTablesRef.current.find((candidate) => candidate.id === tableId);
+    const formula = parseStructuredTableFormula(commandName, commandArgument);
+
+    if (table && formula) {
+      const result = evaluateStructuredTableFormula(table, formula);
+
+      if (result === null) {
+        setFileStatus("Table formula needs a valid range with numeric values.");
+        setFileStatusKind("error");
+        return;
+      }
+
+      updateStructuredCell(tableId, rowIndex, columnIndex, (cell) => {
+        const commandFrom = Math.max(0, cell.text.length - commandLength);
+
+        return {
+          text: `${cell.text.slice(0, commandFrom).trimEnd()}${result}`,
+          activeStyle: cell.activeStyle,
+          styles: []
+        };
+      });
+      setTableRenderRevision((revision) => revision + 1);
+      moveStructuredTableCell({ tableId, rowIndex, columnIndex });
+      setFileStatus("Table formula calculated.");
+      setFileStatusKind("success");
+      return;
+    }
+
+    updateStructuredCell(tableId, rowIndex, columnIndex, (cell) => {
+      const commandFrom = Math.max(0, cell.text.length - commandLength);
+      const nextText = cell.text.slice(0, commandFrom).trimEnd();
+      const currentStyle = cell.styles?.slice(-1)[0]?.style ?? defaultTextStyle;
+      const style = getCellStyleForCommand(commandName, commandArgument, currentStyle);
+
+      if (!style) {
+        return cell;
+      }
+
+      const formattedFrom = selection.from < selection.to ? selection.from : 0;
+      const formattedTo = selection.from < selection.to ? selection.to : nextText.length;
+      const shiftedStyles = (cell.styles ?? [])
+        .filter((range) => range.to <= commandFrom)
+        .map((range) => ({
+          ...range,
+          to: Math.min(range.to, nextText.length)
+        }))
+        .filter((range) => range.from < range.to);
+
+      return {
+        text: nextText,
+        activeStyle: nextText.length === 0 ? style : cell.activeStyle,
+        styles: formattedFrom < formattedTo
+          ? [
+              ...shiftedStyles,
+              {
+                from: formattedFrom,
+                to: formattedTo,
+                style
+              }
+            ]
+          : shiftedStyles
+      };
+    });
+    setTableRenderRevision((revision) => revision + 1);
+    moveStructuredTableCell({ tableId, rowIndex, columnIndex });
+    setFileStatus(`Applied //${commandName} in table cell.`);
+    setFileStatusKind("success");
+  }, [getCellStyleForCommand, moveStructuredTableCell, updateStructuredCell]);
+
   const runFileCommand = useCallback(async (
     commandName: "save" | "new" | "open" | "export",
     documentText: string,
     title: string,
     currentPath: string | null,
-    styles: TextStyleRange[]
+    styles: TextStyleRange[],
+    tables: StructuredTable[]
   ) => {
     const isTauri = "__TAURI_INTERNALS__" in window;
 
@@ -2436,7 +3117,8 @@ function Editor() {
       const newNote = {
         title: getNoteTitleFromPath(newNotePath),
         content: "",
-        styles: []
+        styles: [],
+        tables: []
       };
 
       try {
@@ -2480,7 +3162,8 @@ function Editor() {
     const note = {
       title,
       content: documentText,
-      styles
+      styles,
+      tables
     };
 
     try {
@@ -2496,7 +3179,8 @@ function Editor() {
           content: documentText,
           savedAt: new Date().toISOString(),
           path: outputPath,
-          styles
+          styles,
+          tables
         };
 
         setOpenedNotes((currentNotes) => {
@@ -2533,7 +3217,7 @@ function Editor() {
       style: { ...range.style }
     }));
 
-    void runFileCommand("new", value, activeNoteTitle, openedNotePath, currentStyles);
+    void runFileCommand("new", value, activeNoteTitle, openedNotePath, currentStyles, structuredTablesRef.current);
   }, [activeNoteTitle, openedNotePath, runFileCommand, value]);
 
   const runTableFormulaAtCursor = useCallback((view: EditorView) => {
@@ -2580,6 +3264,7 @@ function Editor() {
     setFileStatusKind("success");
     return true;
   }, []);
+  void runTableFormulaAtCursor;
 
   const runPythonBlockAtCursor = useCallback((view: EditorView) => {
     const selectedBlock = getSelectedPythonCodeBlock(view);
@@ -2870,29 +3555,33 @@ function Editor() {
     );
 
     if (commandName === "table") {
-      const tableTemplate = [
-        "| Column 1 | Column 2 | Column 3 |",
-        "| ---      | ---      | ---      |",
-        "|          |          |          |",
-        "|          |          |          |",
-        ""
-      ].join("\n");
+      const tableId = crypto.randomUUID();
+      const tableAnchor = `[[x2-table:${tableId}]]\n`;
+      const table: StructuredTable = {
+        id: tableId,
+        columns: ["Column 1", "Column 2", "Column 3"],
+        rows: [
+          [{ text: "", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }],
+          [{ text: "", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }]
+        ]
+      };
 
       view.dispatch({
         changes: {
           from: pendingCommand.from,
           to: pendingCommand.to,
-          insert: tableTemplate
+          insert: tableAnchor
         },
-        selection: { anchor: pendingCommand.from + tableTemplate.indexOf("Column 1") },
+        selection: { anchor: pendingCommand.from + tableAnchor.length },
         scrollIntoView: true
       });
-      const table = getMarkdownTableAtPosition(view.state.doc, pendingCommand.from);
-
-      if (table) {
-        normalizeTableAndMoveToCell(view, table, -1, 0);
-      }
-
+      setStructuredTables((currentTables) => {
+        const nextTables = normalizeStructuredTables([...currentTables, table]);
+        structuredTablesRef.current = nextTables;
+        return nextTables;
+      });
+      setTableRenderRevision((revision) => revision + 1);
+      moveStructuredTableCell({ tableId, rowIndex: 0, columnIndex: 0 });
       setShowCommands(false);
       setCommandQuery("");
       return true;
@@ -2934,7 +3623,14 @@ function Editor() {
       });
       setShowCommands(false);
       setCommandQuery("");
-      void runFileCommand(commandName, documentText, activeNoteTitle, openedNotePath, documentStyles);
+      void runFileCommand(
+        commandName,
+        documentText,
+        activeNoteTitle,
+        openedNotePath,
+        documentStyles,
+        structuredTablesRef.current
+      );
       return true;
     }
 
@@ -2971,7 +3667,7 @@ function Editor() {
     setShowCommands(false);
     setCommandQuery("");
     return true;
-  }, [activeNoteTitle, openedNotePath, runFileCommand]);
+  }, [activeNoteTitle, moveStructuredTableCell, openedNotePath, runFileCommand]);
 
   const editorExtensions = useMemo(() => [
     markdown({
@@ -2982,7 +3678,7 @@ function Editor() {
     EditorView.lineWrapping,
     textStyleDecorations,
     commandLineDecorations,
-    tableDecorations,
+    structuredTableDecorations(structuredTablesRef.current),
     codeBoxDecorations,
     EditorView.inputHandler.of((view, _from, _to, text) => {
       const block = getSelectedPythonCodeBlock(view);
@@ -3014,9 +3710,7 @@ function Editor() {
             return false;
           }
 
-          return runTableFormulaAtCursor(view) ||
-            moveTableCellOrAddRow(view) ||
-            runAiCommandAtCursor(view) ||
+          return runAiCommandAtCursor(view) ||
             runCommandAtCursor(view) ||
             continueListAtCursor(view);
         }
@@ -3031,31 +3725,27 @@ function Editor() {
       },
       {
         key: "ArrowDown",
-        run: (view) => moveInsidePythonCodeBoxOneLine(view, "down") || moveTableCell(view, "down") || moveOutsideCodeBoxOneLine(view, "down")
+        run: (view) => moveInsidePythonCodeBoxOneLine(view, "down") || moveOutsideCodeBoxOneLine(view, "down")
       },
       {
         key: "ArrowUp",
-        run: (view) => moveInsidePythonCodeBoxOneLine(view, "up") || moveTableCell(view, "up") || moveOutsideCodeBoxOneLine(view, "up")
+        run: (view) => moveInsidePythonCodeBoxOneLine(view, "up") || moveOutsideCodeBoxOneLine(view, "up")
       },
       {
         key: "ArrowLeft",
-        run: (view) => !!getSelectedPythonCodeBlock(view) || moveTableCellAtHorizontalBoundary(view, "left") || keepHorizontalArrowInsidePythonCodeBox(view, "left")
+        run: (view) => !!getSelectedPythonCodeBlock(view) || keepHorizontalArrowInsidePythonCodeBox(view, "left")
       },
       {
         key: "ArrowRight",
-        run: (view) => !!getSelectedPythonCodeBlock(view) || moveTableCellAtHorizontalBoundary(view, "right") || keepHorizontalArrowInsidePythonCodeBox(view, "right")
+        run: (view) => !!getSelectedPythonCodeBlock(view) || keepHorizontalArrowInsidePythonCodeBox(view, "right")
       },
       {
         key: "Tab",
-        run: (view) => aiSession?.status === "ready" ? cycleAiPlacement() : moveTableCell(view, "next") || indentInsidePythonCodeBox(view)
-      },
-      {
-        key: "Ctrl-Tab",
-        run: addTableColumnAfter
+        run: (view) => aiSession?.status === "ready" ? cycleAiPlacement() : indentInsidePythonCodeBox(view)
       },
       {
         key: "Shift-Tab",
-        run: (view) => moveTableCell(view, "previous")
+        run: () => false
       },
       {
         key: "Escape",
@@ -3077,19 +3767,6 @@ function Editor() {
     EditorView.updateListener.of((update) => {
       if (!update.docChanged) {
         return;
-      }
-
-      const tableContext = update.state.selection.main.empty
-        ? getTableCellAtPosition(update.state.doc, update.state.selection.main.head)
-        : null;
-
-      if (tableContext && tableWasChanged(update.changes, tableContext.table)) {
-        normalizeTableAndKeepCursor(
-          update.view,
-          tableContext.table,
-          tableContext.cell,
-          update.state.selection.main.head
-        );
       }
 
       const previousCodeBlocks = getPythonCodeBlocks(update.startState.doc);
@@ -3218,7 +3895,7 @@ function Editor() {
     runAiCommandAtCursor,
     runCommandAtCursor,
     runPythonBlockAtCursor,
-    runTableFormulaAtCursor
+    tableRenderRevision
   ]);
 
   const onChange = useCallback((val: string, viewUpdate: any) => {
@@ -3433,6 +4110,122 @@ function Editor() {
       editorView.dispatch({ effects: setCodeBoxOutputs.of(codeRuns) });
     }
   }, [codeRuns]);
+
+  useEffect(() => {
+    const activeCell = activeStructuredCellRef.current;
+
+    if (activeCell) {
+      scheduleStructuredCellFocus(activeCell);
+    }
+  }, [tableRenderRevision]);
+
+  useEffect(() => {
+    const handleCellInput = (event: Event) => {
+      const detail = (event as CustomEvent).detail as StructuredTableCellTarget & { text: string };
+
+      updateStructuredCell(detail.tableId, detail.rowIndex, detail.columnIndex, (cell) => ({
+        text: detail.text,
+        activeStyle: cell.activeStyle,
+        styles: cell.activeStyle && !isDefaultTextStyle(cell.activeStyle)
+          ? [{
+              from: 0,
+              to: detail.text.length,
+              style: cell.activeStyle
+            }]
+          : (cell.styles ?? [])
+              .map((range) => ({
+                ...range,
+                from: Math.min(range.from, detail.text.length),
+                to: Math.min(range.to, detail.text.length)
+              }))
+              .filter((range) => range.from < range.to)
+      }));
+    };
+
+    const handleCellFocus = (event: Event) => {
+      const detail = (event as CustomEvent).detail as StructuredTableCellTarget;
+      activeStructuredCellRef.current = detail;
+    };
+
+    const handleCellKey = (event: Event) => {
+      const detail = (event as CustomEvent).detail as StructuredTableCellTarget & {
+        key: string;
+        shiftKey: boolean;
+        ctrlKey: boolean;
+        commandName: string;
+        commandArgument: string;
+        commandLength: number;
+        selection: { from: number; to: number };
+      };
+      const table = structuredTablesRef.current.find((candidate) => candidate.id === detail.tableId);
+
+      if (!table) {
+        return;
+      }
+
+      if (detail.commandName) {
+        runStructuredTableCellCommand(
+          detail.tableId,
+          detail.rowIndex,
+          detail.columnIndex,
+          detail.commandName,
+          detail.commandArgument,
+          detail.commandLength,
+          detail.selection
+        );
+        return;
+      }
+
+      if (detail.ctrlKey && detail.key === "Tab") {
+        addStructuredTableColumn(detail.tableId, detail.columnIndex, detail.rowIndex);
+        return;
+      }
+
+      let targetRow = detail.rowIndex;
+      let targetColumn = detail.columnIndex;
+
+      if (detail.key === "Tab") {
+        targetColumn += detail.shiftKey ? -1 : 1;
+
+        if (targetColumn >= table.columns.length) {
+          targetColumn = 0;
+          targetRow += 1;
+        } else if (targetColumn < 0) {
+          targetColumn = table.columns.length - 1;
+          targetRow -= 1;
+        }
+      } else if (detail.key === "Enter") {
+        targetRow += 1;
+      }
+
+      if (targetRow < -1) {
+        editorViewRef.current?.focus();
+        return;
+      }
+
+      if (targetRow >= table.rows.length) {
+        addStructuredTableRow(detail.tableId, targetColumn);
+        return;
+      }
+
+      moveStructuredTableCell({ tableId: detail.tableId, rowIndex: targetRow, columnIndex: targetColumn });
+    };
+
+    document.addEventListener(TABLE_WIDGET_INPUT_EVENT, handleCellInput);
+    document.addEventListener(TABLE_WIDGET_FOCUS_EVENT, handleCellFocus);
+    document.addEventListener(TABLE_WIDGET_KEY_EVENT, handleCellKey);
+    return () => {
+      document.removeEventListener(TABLE_WIDGET_INPUT_EVENT, handleCellInput);
+      document.removeEventListener(TABLE_WIDGET_FOCUS_EVENT, handleCellFocus);
+      document.removeEventListener(TABLE_WIDGET_KEY_EVENT, handleCellKey);
+    };
+  }, [
+    addStructuredTableColumn,
+    addStructuredTableRow,
+    moveStructuredTableCell,
+    runStructuredTableCellCommand,
+    updateStructuredCell
+  ]);
 
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {

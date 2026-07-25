@@ -679,6 +679,50 @@ input {
   font-weight: 700;
 }
 
+.editor-stage .structured-table-widget {
+  display: block;
+  margin: 12px 0;
+  color: #f8fbff;
+}
+
+.editor-stage .structured-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: transparent;
+  font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+.editor-stage .structured-table th,
+.editor-stage .structured-table td {
+  border: 1px solid rgba(209, 213, 219, 0.5);
+  padding: 0;
+  vertical-align: top;
+}
+
+.editor-stage .structured-table th {
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 700;
+}
+
+.editor-stage .structured-table-cell-editor {
+  min-height: 30px;
+  padding: 6px 8px;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.editor-stage .structured-table-cell-editor:focus {
+  background: rgba(103, 232, 249, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(103, 232, 249, 0.65);
+}
+
+.editor-stage .structured-table-header-editor {
+  min-height: 28px;
+}
+
 .editor-stage .cm-code-box-line {
   border-right: 1px solid rgba(255, 255, 255, 0.11);
   border-left: 1px solid rgba(255, 255, 255, 0.11);
