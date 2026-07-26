@@ -314,11 +314,41 @@ fn run_python_snippet(code: String) -> Result<CodeRunResult, String> {
         return Err("Python code block is empty.".to_string());
     }
 
-    run_python_with_command("py", &["-3", "-"], &code)
-        .or_else(|_| run_python_with_command("python", &["-"], &code))
-        .map_err(|error| {
-            format!("{error} Make sure Python is installed and available as 'py -3' or 'python'.")
-        })
+    let candidates = [("py", &["-3", "-"][..]), ("python", &["-"][..])];
+    let mut failures = Vec::new();
+
+    for (program, args) in candidates {
+        match verify_python_command(program, args) {
+            Ok(()) => return run_python_with_command(program, args, &code),
+            Err(error) => failures.push(error),
+        }
+    }
+
+    Err(format!(
+        "Could not find a working Python 3 interpreter. {} Make sure Python is installed and \
+         available as 'py -3' or 'python'.",
+        failures.join(" ")
+    ))
+}
+
+fn verify_python_command(program: &str, args: &[&str]) -> Result<(), String> {
+    let probe = "import sys\nraise SystemExit(0 if sys.version_info.major == 3 else 1)";
+    let result = run_python_with_command(program, args, probe)?;
+
+    if result.exit_code == Some(0) {
+        return Ok(());
+    }
+
+    let details = result.stderr.trim();
+    if details.is_empty() {
+        Err(format!(
+            "{program} did not provide a working Python 3 interpreter."
+        ))
+    } else {
+        Err(format!(
+            "{program} did not provide a working Python 3 interpreter: {details}"
+        ))
+    }
 }
 
 fn run_python_with_command(
@@ -765,8 +795,14 @@ fn styles_for_content_range(
     byte_from: usize,
     byte_to: usize,
 ) -> Vec<TextStyleRange> {
-    let code_unit_from = content[..byte_from].chars().map(char::len_utf16).sum::<usize>();
-    let code_unit_to = content[..byte_to].chars().map(char::len_utf16).sum::<usize>();
+    let code_unit_from = content[..byte_from]
+        .chars()
+        .map(char::len_utf16)
+        .sum::<usize>();
+    let code_unit_to = content[..byte_to]
+        .chars()
+        .map(char::len_utf16)
+        .sum::<usize>();
 
     styles
         .iter()
@@ -1234,6 +1270,313 @@ fn current_timestamp() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+#[cfg(test)]
+mod feature_stress_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory {
+        path: PathBuf,
+    }
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("x2pad-{label}-{}-{sequence}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("create test directory");
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn sample_style() -> TextStyle {
+        TextStyle {
+            font_size: "18".to_string(),
+            text_color: "Blue".to_string(),
+            is_bold: true,
+            is_italic: true,
+            is_strike: true,
+            is_underline: true,
+        }
+    }
+
+    fn sample_table() -> X2Table {
+        X2Table {
+            id: "table-one".to_string(),
+            columns: vec!["Name".to_string(), "Value".to_string()],
+            rows: vec![vec![
+                X2TableCell {
+                    text: "alpha".to_string(),
+                    styles: vec![],
+                    active_style: None,
+                },
+                X2TableCell {
+                    text: "42".to_string(),
+                    styles: vec![TextStyleRange {
+                        from: 0,
+                        to: 2,
+                        style: sample_style(),
+                    }],
+                    active_style: Some(sample_style()),
+                },
+            ]],
+        }
+    }
+
+    #[test]
+    fn x2_loading_preserves_unicode_styles_and_tables() {
+        let directory = TestDirectory::new("load-valid");
+        let path = directory.path.join("Unicode.X2");
+        let content = "Hello 👋 世界";
+        let note = json!({
+            "format": X2_FORMAT,
+            "version": X2_VERSION,
+            "title": "Unicode note",
+            "content": content,
+            "styles": [{
+                "from": 6,
+                "to": 8,
+                "style": {
+                    "fontSize": "18",
+                    "textColor": "Blue",
+                    "isBold": true,
+                    "isItalic": true,
+                    "isStrike": true,
+                    "isUnderline": true
+                }
+            }],
+            "tables": [{
+                "id": "table-one",
+                "columns": ["Name", "Value"],
+                "rows": [[
+                    {"text": "alpha", "styles": []},
+                    {"text": "42", "styles": [], "activeStyle": null}
+                ]]
+            }],
+            "savedAt": "2026-07-26T00:00:00Z"
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&note).unwrap()).unwrap();
+
+        let loaded = load_x2_note_from_path(&path).unwrap();
+        assert_eq!(loaded.title, "Unicode note");
+        assert_eq!(loaded.content, content);
+        assert_eq!(loaded.styles.len(), 1);
+        assert_eq!(loaded.styles[0].from, 6);
+        assert_eq!(loaded.styles[0].to, 8);
+        assert_eq!(loaded.tables.len(), 1);
+        assert_eq!(loaded.tables[0].rows[0][1].text, "42");
+        assert_eq!(loaded.saved_at, "2026-07-26T00:00:00Z");
+    }
+
+    #[test]
+    fn x2_loading_accepts_v1_and_rejects_bad_inputs() {
+        let directory = TestDirectory::new("load-invalid");
+        let valid_v1 = directory.path.join("old.x2");
+        std::fs::write(
+            &valid_v1,
+            json!({
+                "format": X2_FORMAT,
+                "version": 1,
+                "title": "Old",
+                "content": "still readable",
+                "savedAt": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let old_note = load_x2_note_from_path(&valid_v1).unwrap();
+        assert!(old_note.styles.is_empty());
+        assert!(old_note.tables.is_empty());
+
+        let wrong_extension = directory.path.join("note.json");
+        std::fs::write(&wrong_extension, "{}").unwrap();
+        assert!(load_x2_note_from_path(&wrong_extension)
+            .err()
+            .unwrap()
+            .contains("Only .x2"));
+
+        for (file_name, body, expected_error) in [
+            ("broken.x2", "{", "Could not parse"),
+            (
+                "wrong-format.x2",
+                r#"{"format":"other","version":1,"title":"","content":"","savedAt":""}"#,
+                "not an x2pad note",
+            ),
+            (
+                "zero.x2",
+                r#"{"format":"x2pad.note","version":0,"title":"","content":"","savedAt":""}"#,
+                "Unsupported .x2 version 0",
+            ),
+            (
+                "future.x2",
+                r#"{"format":"x2pad.note","version":99,"title":"","content":"","savedAt":""}"#,
+                "Unsupported .x2 version 99",
+            ),
+        ] {
+            let path = directory.path.join(file_name);
+            std::fs::write(&path, body).unwrap();
+            assert!(
+                load_x2_note_from_path(&path)
+                    .err()
+                    .unwrap()
+                    .contains(expected_error),
+                "{file_name} should report {expected_error}"
+            );
+        }
+    }
+
+    #[test]
+    fn folder_loading_sorts_notes_and_skips_corrupt_files() {
+        let directory = TestDirectory::new("folder");
+        for (file_name, title) in [("z-last.x2", "Z"), ("A-first.X2", "A")] {
+            std::fs::write(
+                directory.path.join(file_name),
+                json!({
+                    "format": X2_FORMAT,
+                    "version": X2_VERSION,
+                    "title": title,
+                    "content": title,
+                    "savedAt": "2026-01-01T00:00:00Z"
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        std::fs::write(directory.path.join("middle.x2"), "not json").unwrap();
+        std::fs::write(directory.path.join("ignored.txt"), "ignored").unwrap();
+
+        let folder = load_x2_folder_from_path(&directory.path).unwrap();
+        assert_eq!(
+            folder
+                .notes
+                .iter()
+                .map(|note| note.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "Z"]
+        );
+        assert!(folder.active_path.to_lowercase().ends_with("a-first.x2"));
+    }
+
+    #[test]
+    fn path_detection_is_case_insensitive_and_uses_first_x2_argument() {
+        assert!(is_x2_path(r"C:\Notes\ONE.X2"));
+        assert!(!is_x2_path(r"C:\Notes\x2"));
+        assert!(!is_x2_path(r"C:\Notes\one.x2.txt"));
+        assert_eq!(
+            find_x2_path(vec![
+                "--flag".to_string(),
+                "first.X2".to_string(),
+                "second.x2".to_string()
+            ]),
+            Some("first.X2".to_string())
+        );
+    }
+
+    #[test]
+    fn pdf_export_handles_long_styled_notes_and_structured_tables() {
+        let directory = TestDirectory::new("pdf");
+        let path = directory.path.join("stress.pdf");
+        let mut content = String::from("Styled opening\n[[x2-table:table-one]]\n");
+        for index in 0..250 {
+            content.push_str(&format!(
+                "Line {index}: a deliberately long sentence that must wrap safely across PDF pages.\n"
+            ));
+        }
+        let note = NotePayload {
+            title: "PDF stress".to_string(),
+            content,
+            styles: vec![TextStyleRange {
+                from: 0,
+                to: 14,
+                style: sample_style(),
+            }],
+            tables: vec![sample_table()],
+        };
+
+        export_note_pdf(path.to_string_lossy().to_string(), note).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(bytes.len() > 10_000);
+    }
+
+    #[test]
+    fn python_runner_captures_success_stderr_failure_and_large_output() {
+        assert!(run_python_snippet("  \n".to_string())
+            .err()
+            .unwrap()
+            .contains("empty"));
+
+        let success = run_python_snippet(
+            "import sys\nprint('hello')\nprint('warning', file=sys.stderr)".to_string(),
+        )
+        .unwrap();
+        assert_eq!(success.exit_code, Some(0));
+        assert_eq!(success.stdout.lines().collect::<Vec<_>>(), vec!["hello"]);
+        assert_eq!(success.stderr.lines().collect::<Vec<_>>(), vec!["warning"]);
+
+        let failure = run_python_snippet("raise ValueError('boom')".to_string()).unwrap();
+        assert_ne!(failure.exit_code, Some(0));
+        assert!(failure.stderr.contains("ValueError: boom"));
+
+        let large = run_python_snippet("print('x' * 300000)".to_string()).unwrap();
+        assert_eq!(large.stdout.len(), CODE_OUTPUT_LIMIT_BYTES);
+        assert!(large.stderr.contains("Output was truncated"));
+    }
+
+    #[test]
+    fn python_runner_stops_infinite_work_at_the_timeout() {
+        let started = Instant::now();
+        let result =
+            run_python_snippet("while True:\n    pass".to_string()).expect("run timed snippet");
+
+        assert_eq!(result.exit_code, None);
+        assert!(result.stderr.contains("timed out after 5 seconds"));
+        assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[test]
+    fn pdf_helpers_handle_utf16_ranges_wrapping_and_colors() {
+        let content = "A👋B";
+        let styles = vec![TextStyleRange {
+            from: 1,
+            to: 3,
+            style: sample_style(),
+        }];
+        let lines = build_styled_pdf_lines(content, &styles);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0]
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "👋", "B"]
+        );
+        assert!(lines[0][1].style.is_bold);
+        assert!(!lines[0][0].style.is_bold);
+
+        let wrapped = wrap_styled_pdf_line(&lines[0], 1.0);
+        assert!(wrapped.len() >= 3);
+        assert_eq!(parse_hex_color("#7aa2ff"), Some((122, 162, 255)));
+        assert_eq!(parse_hex_color("#xyzxyz"), None);
+        assert_eq!(sanitize_pdf_text("a\0b\nc"), "a b c");
+
+        assert_eq!(
+            find_next_table_anchor("before [[x2-table:abc-123]] after", 0),
+            Some((7, 27, "abc-123".to_string()))
+        );
+        assert_eq!(find_next_table_anchor("[[x2-table:]]", 0), None);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

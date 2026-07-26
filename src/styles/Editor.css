@@ -682,7 +682,27 @@ input {
 .editor-stage .structured-table-widget {
   display: block;
   margin: 12px 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
   color: #f8fbff;
+  outline: none;
+}
+
+.editor-stage .structured-table-widget.is-selected:not(:focus-within) {
+  border-color: rgba(103, 232, 249, 0.82);
+  background: rgba(20, 28, 34, 0.38);
+  box-shadow: 0 10px 28px rgba(4, 18, 22, 0.24), inset 0 0 12px rgba(103, 232, 249, 0.08);
+}
+
+.editor-stage .cm-structured-table-selected .cm-content {
+  caret-color: transparent !important;
+}
+
+.editor-stage .cm-structured-table-selected .cm-cursor,
+.editor-stage .cm-structured-table-selected .cm-dropCursor {
+  display: none !important;
+  border-left-color: transparent !important;
+  opacity: 0;
 }
 
 .editor-stage .structured-table {
@@ -717,6 +737,17 @@ input {
 .editor-stage .structured-table-cell-editor:focus {
   background: rgba(103, 232, 249, 0.08);
   box-shadow: inset 0 0 0 1px rgba(103, 232, 249, 0.65);
+}
+
+.editor-stage .structured-table-cell-editor.is-navigating {
+  background: rgba(196, 167, 255, 0.09);
+  box-shadow: inset 0 0 0 2px rgba(196, 167, 255, 0.78);
+}
+
+.editor-stage .structured-table-cell-editor.is-row-selected,
+.editor-stage .structured-table-cell-editor.is-column-selected {
+  background: rgba(103, 232, 249, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(103, 232, 249, 0.72);
 }
 
 .editor-stage .structured-table-header-editor {

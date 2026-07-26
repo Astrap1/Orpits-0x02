@@ -349,6 +349,55 @@ function placeCaretAtEnd(element: HTMLElement) {
   selection?.addRange(range);
 }
 
+function placeCaretAtStart(element: HTMLElement) {
+  const selection = window.getSelection();
+  const range = document.createRange();
+
+  range.selectNodeContents(element);
+  range.collapse(true);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function keepStructuredCellCaretContained(
+  editor: HTMLElement,
+  event: globalThis.KeyboardEvent
+) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+    return;
+  }
+
+  const selectionOffset = getSelectionOffsetWithin(editor);
+  const textLength = editor.textContent?.length ?? 0;
+
+  if (
+    (event.key === "ArrowLeft" && selectionOffset.from === 0 && selectionOffset.to === 0) ||
+    (event.key === "ArrowRight" && selectionOffset.from === textLength && selectionOffset.to === textLength)
+  ) {
+    event.preventDefault();
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    const selection = window.getSelection();
+    const selectionStayedInside = !!selection?.anchorNode &&
+      !!selection.focusNode &&
+      editor.contains(selection.anchorNode) &&
+      editor.contains(selection.focusNode);
+
+    if (selectionStayedInside) {
+      return;
+    }
+
+    editor.focus();
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      placeCaretAtStart(editor);
+    } else {
+      placeCaretAtEnd(editor);
+    }
+  });
+}
+
 function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
   let attempts = 0;
 
@@ -357,8 +406,18 @@ function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
     const element = document.querySelector<HTMLElement>(getStructuredTableCellSelector(target));
 
     if (element) {
+      element.closest(".structured-table-widget")
+        ?.querySelectorAll(
+          ".structured-table-cell-editor.is-navigating, " +
+          ".structured-table-cell-editor.is-row-selected, " +
+          ".structured-table-cell-editor.is-column-selected"
+        )
+        .forEach((cell) => {
+          cell.classList.remove("is-navigating", "is-row-selected", "is-column-selected");
+        });
       element.focus();
       placeCaretAtEnd(element);
+      return;
     }
 
     if (attempts < 12) {
@@ -367,6 +426,51 @@ function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
   };
 
   requestAnimationFrame(focusCell);
+}
+
+type StructuredTableSelectionMode = "cell" | "row" | "column";
+
+function scheduleStructuredCellNavigation(
+  target: StructuredTableCellTarget,
+  selectionMode: StructuredTableSelectionMode = "cell"
+) {
+  let attempts = 0;
+
+  const selectCell = () => {
+    attempts += 1;
+    const element = document.querySelector<HTMLElement>(getStructuredTableCellSelector(target));
+    const wrapper = element?.closest<HTMLElement>(".structured-table-widget");
+
+    if (element && wrapper) {
+      wrapper.querySelectorAll(
+        ".structured-table-cell-editor.is-navigating, " +
+        ".structured-table-cell-editor.is-row-selected, " +
+        ".structured-table-cell-editor.is-column-selected"
+      ).forEach((cell) => {
+        cell.classList.remove("is-navigating", "is-row-selected", "is-column-selected");
+      });
+
+      if (selectionMode === "row") {
+        wrapper.querySelectorAll<HTMLElement>(
+          `.structured-table-cell-editor[data-row-index="${target.rowIndex}"]`
+        ).forEach((cell) => cell.classList.add("is-row-selected"));
+      } else if (selectionMode === "column") {
+        wrapper.querySelectorAll<HTMLElement>(
+          `.structured-table-cell-editor[data-column-index="${target.columnIndex}"]`
+        ).forEach((cell) => cell.classList.add("is-column-selected"));
+      } else {
+        element.classList.add("is-navigating");
+      }
+      wrapper.focus();
+      return;
+    }
+
+    if (attempts < 12) {
+      window.setTimeout(() => requestAnimationFrame(selectCell), 16);
+    }
+  };
+
+  requestAnimationFrame(selectCell);
 }
 
 function getStructuredTableCellCommand(text: string) {
@@ -420,6 +524,7 @@ function createStructuredTableCellElement(tableId: string, rowIndex: number, col
     });
   });
   editor.addEventListener("keydown", (event) => {
+    keepStructuredCellCaretContained(editor, event);
     const command = getStructuredTableCellCommand(editor.textContent ?? "");
 
     if (
@@ -449,77 +554,89 @@ function createStructuredTableCellElement(tableId: string, rowIndex: number, col
 }
 
 class StructuredTableWidget extends WidgetType {
-  constructor(private readonly table: StructuredTable) {
+  constructor(
+    private readonly table: StructuredTable,
+    private readonly isSelected: boolean
+  ) {
     super();
   }
 
   eq(widget: StructuredTableWidget) {
-    return JSON.stringify(widget.table) === JSON.stringify(this.table);
+    return widget.isSelected === this.isSelected &&
+      JSON.stringify(widget.table) === JSON.stringify(this.table);
   }
 
   toDOM() {
     const wrapper = document.createElement("div");
     const tableElement = document.createElement("table");
 
-    wrapper.className = "structured-table-widget";
+    wrapper.className = [
+      "structured-table-widget",
+      this.isSelected ? "is-selected" : ""
+    ].filter(Boolean).join(" ");
     wrapper.contentEditable = "false";
+    wrapper.tabIndex = -1;
+    wrapper.dataset.tableId = this.table.id;
     tableElement.className = "structured-table";
 
-    const thead = document.createElement("thead");
-    const headerRow = document.createElement("tr");
+    if (this.table.columns.some((column) => column.trim().length > 0)) {
+      const thead = document.createElement("thead");
+      const headerRow = document.createElement("tr");
 
-    this.table.columns.forEach((column, columnIndex) => {
-      const header = document.createElement("th");
-      const headerEditor = document.createElement("div");
+      this.table.columns.forEach((column, columnIndex) => {
+        const header = document.createElement("th");
+        const headerEditor = document.createElement("div");
 
-      headerEditor.className = "structured-table-cell-editor structured-table-header-editor";
-      headerEditor.contentEditable = "true";
-      headerEditor.spellcheck = false;
-      headerEditor.textContent = column;
-      headerEditor.dataset.tableId = this.table.id;
-      headerEditor.dataset.rowIndex = "-1";
-      headerEditor.dataset.columnIndex = String(columnIndex);
-      headerEditor.setAttribute("role", "textbox");
-      headerEditor.setAttribute("aria-label", `Table header ${columnIndex + 1}`);
-      headerEditor.addEventListener("input", () => {
-        dispatchTableWidgetEvent(TABLE_WIDGET_INPUT_EVENT, {
-          tableId: this.table.id,
-          rowIndex: -1,
-          columnIndex,
-          text: headerEditor.textContent ?? ""
-        });
-      });
-      headerEditor.addEventListener("focus", () => {
-        dispatchTableWidgetEvent(TABLE_WIDGET_FOCUS_EVENT, {
-          tableId: this.table.id,
-          rowIndex: -1,
-          columnIndex
-        });
-      });
-      headerEditor.addEventListener("keydown", (event) => {
-        if (event.key === "Tab" || event.key === "Enter") {
-          event.preventDefault();
-          dispatchTableWidgetEvent(TABLE_WIDGET_KEY_EVENT, {
+        headerEditor.className = "structured-table-cell-editor structured-table-header-editor";
+        headerEditor.contentEditable = "true";
+        headerEditor.spellcheck = false;
+        headerEditor.textContent = column;
+        headerEditor.dataset.tableId = this.table.id;
+        headerEditor.dataset.rowIndex = "-1";
+        headerEditor.dataset.columnIndex = String(columnIndex);
+        headerEditor.setAttribute("role", "textbox");
+        headerEditor.setAttribute("aria-label", `Table header ${columnIndex + 1}`);
+        headerEditor.addEventListener("input", () => {
+          dispatchTableWidgetEvent(TABLE_WIDGET_INPUT_EVENT, {
             tableId: this.table.id,
             rowIndex: -1,
             columnIndex,
-            key: event.key,
-            shiftKey: event.shiftKey,
-            ctrlKey: event.ctrlKey || event.metaKey,
-            commandName: "",
-            commandArgument: "",
-            commandLength: 0,
-            selection: getSelectionOffsetWithin(headerEditor)
+            text: headerEditor.textContent ?? ""
           });
-        }
+        });
+        headerEditor.addEventListener("focus", () => {
+          dispatchTableWidgetEvent(TABLE_WIDGET_FOCUS_EVENT, {
+            tableId: this.table.id,
+            rowIndex: -1,
+            columnIndex
+          });
+        });
+        headerEditor.addEventListener("keydown", (event) => {
+          keepStructuredCellCaretContained(headerEditor, event);
+          if (event.key === "Tab" || event.key === "Enter") {
+            event.preventDefault();
+            dispatchTableWidgetEvent(TABLE_WIDGET_KEY_EVENT, {
+              tableId: this.table.id,
+              rowIndex: -1,
+              columnIndex,
+              key: event.key,
+              shiftKey: event.shiftKey,
+              ctrlKey: event.ctrlKey || event.metaKey,
+              commandName: "",
+              commandArgument: "",
+              commandLength: 0,
+              selection: getSelectionOffsetWithin(headerEditor)
+            });
+          }
+        });
+
+        header.append(headerEditor);
+        headerRow.append(header);
       });
 
-      header.append(headerEditor);
-      headerRow.append(header);
-    });
-
-    thead.append(headerRow);
-    tableElement.append(thead);
+      thead.append(headerRow);
+      tableElement.append(thead);
+    }
 
     const tbody = document.createElement("tbody");
     this.table.rows.forEach((row, rowIndex) => {
@@ -546,23 +663,36 @@ class StructuredTableWidget extends WidgetType {
   }
 }
 
-function buildStructuredTableDecorations(doc: Text, tables: StructuredTable[]) {
+function getStructuredTableAnchors(doc: Text) {
+  return [...doc.toString().matchAll(STRUCTURED_TABLE_ANCHOR_PATTERN)].map((match) => ({
+    id: match[1],
+    from: match.index ?? 0,
+    to: (match.index ?? 0) + match[0].length
+  }));
+}
+
+function getStructuredTableAnchorById(doc: Text, tableId: string) {
+  return getStructuredTableAnchors(doc).find((anchor) => anchor.id === tableId) ?? null;
+}
+
+function getSelectedStructuredTableAnchor(view: EditorView) {
+  const head = view.state.selection.main.head;
+  return getStructuredTableAnchors(view.state.doc).find((anchor) => anchor.from === head) ?? null;
+}
+
+function buildStructuredTableDecorations(doc: Text, tables: StructuredTable[], selectionHead: number) {
   const builder = new RangeSetBuilder<Decoration>();
   const tableById = new Map(tables.map((table) => [table.id, table]));
-  const text = doc.toString();
 
-  for (const match of text.matchAll(STRUCTURED_TABLE_ANCHOR_PATTERN)) {
-    const id = match[1];
-    const table = tableById.get(id);
-    const from = match.index ?? 0;
-    const to = from + match[0].length;
+  for (const anchor of getStructuredTableAnchors(doc)) {
+    const table = tableById.get(anchor.id);
 
     if (!table) {
       continue;
     }
 
-    builder.add(from, to, Decoration.replace({
-      widget: new StructuredTableWidget(table),
+    builder.add(anchor.from, anchor.to, Decoration.replace({
+      widget: new StructuredTableWidget(table, selectionHead === anchor.from),
       block: true
     }));
   }
@@ -570,20 +700,119 @@ function buildStructuredTableDecorations(doc: Text, tables: StructuredTable[]) {
   return builder.finish();
 }
 
-function structuredTableDecorations(tables: StructuredTable[]) {
-  return StateField.define<DecorationSet>({
+interface StructuredTableDecorationState {
+  decorations: DecorationSet;
+  hasSelectedTable: boolean;
+}
+
+function structuredTableDecorations(
+  tablesRef: MutableRefObject<StructuredTable[]>
+) {
+  return StateField.define<StructuredTableDecorationState>({
     create(state) {
-      return buildStructuredTableDecorations(state.doc, tables);
+      const selectionHead = state.selection.main.head;
+      return {
+        decorations: buildStructuredTableDecorations(
+          state.doc,
+          tablesRef.current,
+          selectionHead
+        ),
+        hasSelectedTable: getStructuredTableAnchors(state.doc).some(
+          (anchor) => anchor.from === selectionHead
+        )
+      };
     },
-    update(decorations, transaction) {
-      if (transaction.docChanged) {
-        return buildStructuredTableDecorations(transaction.state.doc, tables);
+    update(previous, transaction) {
+      const selectionHead = transaction.state.selection.main.head;
+      const hasSelectedTable = getStructuredTableAnchors(transaction.state.doc).some(
+        (anchor) => anchor.from === selectionHead
+      );
+
+      if (transaction.docChanged || transaction.selection) {
+        return {
+          decorations: buildStructuredTableDecorations(
+            transaction.state.doc,
+            tablesRef.current,
+            selectionHead
+          ),
+          hasSelectedTable
+        };
       }
 
-      return decorations.map(transaction.changes);
+      return {
+        decorations: previous.decorations.map(transaction.changes),
+        hasSelectedTable
+      };
     },
-    provide: (field) => EditorView.decorations.from(field)
+    provide: (field) => [
+      EditorView.decorations.from(field, (value) => value.decorations),
+      EditorView.editorAttributes.from(field, (value) => ({
+        class: value.hasSelectedTable ? "cm-structured-table-selected" : ""
+      }))
+    ]
   });
+}
+
+function moveAroundStructuredTable(view: EditorView, direction: "up" | "down") {
+  const selection = view.state.selection.main;
+
+  if (!selection.empty) {
+    return false;
+  }
+
+  const selectedTable = getSelectedStructuredTableAnchor(view);
+
+  if (selectedTable) {
+    const tableLine = view.state.doc.lineAt(selectedTable.from);
+    const targetLineNumber = tableLine.number + (direction === "up" ? -1 : 1);
+
+    if (targetLineNumber < 1) {
+      view.dispatch({
+        changes: { from: 0, to: 0, insert: "\n" },
+        selection: { anchor: 0 },
+        scrollIntoView: true
+      });
+      return true;
+    }
+
+    if (targetLineNumber > view.state.doc.lines) {
+      const insertAt = view.state.doc.length;
+      view.dispatch({
+        changes: { from: insertAt, to: insertAt, insert: "\n" },
+        selection: { anchor: insertAt + 1 },
+        scrollIntoView: true
+      });
+      return true;
+    }
+
+    view.dispatch({
+      selection: { anchor: view.state.doc.line(targetLineNumber).from },
+      scrollIntoView: true
+    });
+    return true;
+  }
+
+  const currentLine = view.state.doc.lineAt(selection.head);
+  const targetLineNumber = currentLine.number + (direction === "up" ? -1 : 1);
+
+  if (targetLineNumber < 1 || targetLineNumber > view.state.doc.lines) {
+    return false;
+  }
+
+  const targetLine = view.state.doc.line(targetLineNumber);
+  const targetTable = getStructuredTableAnchors(view.state.doc).find(
+    (anchor) => anchor.from === targetLine.from
+  );
+
+  if (!targetTable) {
+    return false;
+  }
+
+  view.dispatch({
+    selection: { anchor: targetTable.from },
+    scrollIntoView: true
+  });
+  return true;
 }
 
 function removeTextRangeFromStyleRanges(ranges: TextStyleRange[], from: number, to: number) {
@@ -1268,6 +1497,41 @@ function enterSelectedPythonCodeBox(view: EditorView) {
     scrollIntoView: true
   });
   return true;
+}
+
+function deleteSelectedPythonCodeBox(view: EditorView) {
+  const block = getSelectedPythonCodeBlock(view);
+
+  if (!block) {
+    return false;
+  }
+
+  const deleteTo = block.blockTo < view.state.doc.length &&
+    view.state.doc.sliceString(block.blockTo, block.blockTo + 1) === "\n"
+    ? block.blockTo + 1
+    : block.blockTo;
+
+  view.dispatch({
+    changes: { from: block.blockFrom, to: deleteTo, insert: "" },
+    selection: { anchor: block.blockFrom },
+    effects: [
+      setSelectedCodeBox.of(null),
+      setEditingCodeBox.of(null)
+    ],
+    scrollIntoView: true
+  });
+  return true;
+}
+
+function keepDeletionInsideEmptyPythonCodeBox(view: EditorView) {
+  const selection = view.state.selection.main;
+
+  if (!selection.empty) {
+    return false;
+  }
+
+  const block = getEditingPythonCodeBlock(view);
+  return !!block && block.code.length === 0 && selection.head === block.from;
 }
 
 function movePastSelectedPythonCodeBox(view: EditorView, direction: "up" | "down") {
@@ -2035,7 +2299,13 @@ function evaluateStructuredTableFormula(
 
   for (let rowIndex = fromRow; rowIndex <= toRow; rowIndex += 1) {
     for (let columnIndex = fromColumn; columnIndex <= toColumn; columnIndex += 1) {
-      const value = Number(normalizedTable.rows[rowIndex]?.[columnIndex]?.text.trim().replace(/,/g, ""));
+      const cellText = normalizedTable.rows[rowIndex]?.[columnIndex]?.text.trim().replace(/,/g, "") ?? "";
+
+      if (!cellText) {
+        continue;
+      }
+
+      const value = Number(cellText);
 
       if (Number.isFinite(value)) {
         values.push(value);
@@ -2098,7 +2368,13 @@ function evaluateTableFormula(table: TableBlock, formula: NonNullable<ReturnType
   for (let row = fromRow; row <= toRow; row += 1) {
     for (let column = fromColumn; column <= toColumn; column += 1) {
       const cell = getTableCellByIndexes(table, row, column);
-      const value = Number(cell?.text.replace(/,/g, ""));
+      const cellText = cell?.text.trim().replace(/,/g, "") ?? "";
+
+      if (!cellText) {
+        continue;
+      }
+
+      const value = Number(cellText);
 
       if (Number.isFinite(value)) {
         values.push(value);
@@ -2564,6 +2840,9 @@ function Editor() {
   const forcedStyleRangesRef = useRef<TextStyleRange[] | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
   const activeStructuredCellRef = useRef<StructuredTableCellTarget | null>(null);
+  const structuredTableModeRef = useRef<"navigating" | "editing" | null>(null);
+  const structuredTableSelectionModeRef = useRef<StructuredTableSelectionMode>("cell");
+  const tableShiftWasUsedRef = useRef(false);
   const structuredTablesRef = useRef<StructuredTable[]>([]);
 
   const [openedNoteTitle, setOpenedNoteTitle] = useState<string | null>(null);
@@ -2874,10 +3153,34 @@ function Editor() {
 
   const moveStructuredTableCell = useCallback((target: StructuredTableCellTarget) => {
     activeStructuredCellRef.current = target;
+    structuredTableModeRef.current = "editing";
+    structuredTableSelectionModeRef.current = "cell";
     scheduleStructuredCellFocus(target);
   }, []);
 
-  const addStructuredTableColumn = useCallback((tableId: string, afterColumnIndex: number, rowIndex: number) => {
+  const navigateStructuredTableCell = useCallback((target: StructuredTableCellTarget) => {
+    activeStructuredCellRef.current = target;
+    structuredTableModeRef.current = "navigating";
+    structuredTableSelectionModeRef.current = "cell";
+    scheduleStructuredCellNavigation(target, "cell");
+  }, []);
+
+  const selectStructuredTableRange = useCallback((
+    target: StructuredTableCellTarget,
+    selectionMode: StructuredTableSelectionMode
+  ) => {
+    activeStructuredCellRef.current = target;
+    structuredTableModeRef.current = "navigating";
+    structuredTableSelectionModeRef.current = selectionMode;
+    scheduleStructuredCellNavigation(target, selectionMode);
+  }, []);
+
+  const addStructuredTableColumn = useCallback((
+    tableId: string,
+    afterColumnIndex: number,
+    rowIndex: number,
+    nextMode: "navigating" | "editing" = "editing"
+  ) => {
     const nextTables = normalizeStructuredTables(structuredTablesRef.current.map((table) => {
       if (table.id !== tableId) {
         return table;
@@ -2889,7 +3192,7 @@ function Editor() {
         ...table,
         columns: [
           ...table.columns.slice(0, insertIndex),
-          "New Column",
+          "",
           ...table.columns.slice(insertIndex)
         ],
         rows: table.rows.map((row) => [
@@ -2903,10 +3206,24 @@ function Editor() {
     structuredTablesRef.current = nextTables;
     setStructuredTables(nextTables);
     setTableRenderRevision((revision) => revision + 1);
-    moveStructuredTableCell({ tableId, rowIndex: Math.max(0, rowIndex), columnIndex: afterColumnIndex + 1 });
-  }, [moveStructuredTableCell]);
+    const target = {
+      tableId,
+      rowIndex: Math.max(0, rowIndex),
+      columnIndex: afterColumnIndex + 1
+    };
+    if (nextMode === "navigating") {
+      navigateStructuredTableCell(target);
+    } else {
+      moveStructuredTableCell(target);
+    }
+  }, [moveStructuredTableCell, navigateStructuredTableCell]);
 
-  const addStructuredTableRow = useCallback((tableId: string, columnIndex: number) => {
+  const addStructuredTableRow = useCallback((
+    tableId: string,
+    columnIndex: number,
+    afterRowIndex?: number,
+    nextMode: "navigating" | "editing" = "editing"
+  ) => {
     let nextRowIndex = 0;
 
     const nextTables = normalizeStructuredTables(structuredTablesRef.current.map((table) => {
@@ -2914,12 +3231,16 @@ function Editor() {
         return table;
       }
 
-      nextRowIndex = table.rows.length;
+      nextRowIndex = afterRowIndex === undefined
+        ? table.rows.length
+        : Math.max(0, Math.min(afterRowIndex + 1, table.rows.length));
+      const newRow = table.columns.map(() => ({ text: "", styles: [] }));
       return {
         ...table,
         rows: [
-          ...table.rows,
-          table.columns.map(() => ({ text: "", styles: [] }))
+          ...table.rows.slice(0, nextRowIndex),
+          newRow,
+          ...table.rows.slice(nextRowIndex)
         ]
       };
     }));
@@ -2927,8 +3248,106 @@ function Editor() {
     structuredTablesRef.current = nextTables;
     setStructuredTables(nextTables);
     setTableRenderRevision((revision) => revision + 1);
-    moveStructuredTableCell({ tableId, rowIndex: nextRowIndex, columnIndex });
-  }, [moveStructuredTableCell]);
+    const target = { tableId, rowIndex: nextRowIndex, columnIndex };
+    if (nextMode === "navigating") {
+      navigateStructuredTableCell(target);
+    } else {
+      moveStructuredTableCell(target);
+    }
+  }, [moveStructuredTableCell, navigateStructuredTableCell]);
+
+  const deleteStructuredTableRow = useCallback((
+    tableId: string,
+    rowIndex: number,
+    columnIndex: number
+  ) => {
+    const table = structuredTablesRef.current.find((candidate) => candidate.id === tableId);
+
+    if (!table || table.rows.length <= 1) {
+      setFileStatus("A table must keep at least one row.");
+      return;
+    }
+
+    const nextRowIndex = Math.min(Math.max(0, rowIndex), table.rows.length - 2);
+    const nextTables = normalizeStructuredTables(structuredTablesRef.current.map((candidate) => (
+      candidate.id === tableId
+        ? {
+            ...candidate,
+            rows: candidate.rows.filter((_, index) => index !== rowIndex)
+          }
+        : candidate
+    )));
+
+    structuredTablesRef.current = nextTables;
+    setStructuredTables(nextTables);
+    setTableRenderRevision((revision) => revision + 1);
+    navigateStructuredTableCell({ tableId, rowIndex: nextRowIndex, columnIndex });
+  }, [navigateStructuredTableCell]);
+
+  const deleteStructuredTableColumn = useCallback((
+    tableId: string,
+    rowIndex: number,
+    columnIndex: number
+  ) => {
+    const table = structuredTablesRef.current.find((candidate) => candidate.id === tableId);
+
+    if (!table || table.columns.length <= 1) {
+      setFileStatus("A table must keep at least one column.");
+      return;
+    }
+
+    const nextColumnIndex = Math.min(Math.max(0, columnIndex), table.columns.length - 2);
+    const nextTables = normalizeStructuredTables(structuredTablesRef.current.map((candidate) => (
+      candidate.id === tableId
+        ? {
+            ...candidate,
+            columns: candidate.columns.filter((_, index) => index !== columnIndex),
+            rows: candidate.rows.map((row) => (
+              row.filter((_, index) => index !== columnIndex)
+            ))
+          }
+        : candidate
+    )));
+
+    structuredTablesRef.current = nextTables;
+    setStructuredTables(nextTables);
+    setTableRenderRevision((revision) => revision + 1);
+    navigateStructuredTableCell({
+      tableId,
+      rowIndex: Math.max(0, rowIndex),
+      columnIndex: nextColumnIndex
+    });
+  }, [navigateStructuredTableCell]);
+
+  const deleteSelectedStructuredTable = useCallback((view: EditorView) => {
+    const tableAnchor = getSelectedStructuredTableAnchor(view);
+
+    if (!tableAnchor) {
+      return false;
+    }
+
+    const tableLine = view.state.doc.lineAt(tableAnchor.from);
+    const deleteTo = tableLine.to < view.state.doc.length
+      ? tableLine.to + 1
+      : tableLine.to;
+
+    activeStructuredCellRef.current = null;
+    structuredTableModeRef.current = null;
+    structuredTableSelectionModeRef.current = "cell";
+    const nextTables = structuredTablesRef.current.filter(
+      (table) => table.id !== tableAnchor.id
+    );
+    structuredTablesRef.current = nextTables;
+    setStructuredTables(nextTables);
+    setTableRenderRevision((revision) => revision + 1);
+    view.dispatch({
+      changes: { from: tableLine.from, to: deleteTo, insert: "" },
+      selection: { anchor: tableLine.from },
+      scrollIntoView: true
+    });
+    setFileStatus("Table deleted.");
+    return true;
+  }, []);
 
   const getCellStyleForCommand = useCallback((
     commandName: string,
@@ -3557,22 +3976,31 @@ function Editor() {
     if (commandName === "table") {
       const tableId = crypto.randomUUID();
       const tableAnchor = `[[x2-table:${tableId}]]\n`;
+      const commandLine = view.state.doc.lineAt(pendingCommand.from);
+      const textBeforeCommand = view.state.doc.sliceString(
+        commandLine.from,
+        pendingCommand.from
+      );
+      const hasExistingLineContent = textBeforeCommand.trim().length > 0;
+      const replacementFrom = hasExistingLineContent
+        ? commandLine.from + textBeforeCommand.trimEnd().length
+        : pendingCommand.from;
+      const insertedTableAnchor = hasExistingLineContent
+        ? `\n${tableAnchor}`
+        : tableAnchor;
       const table: StructuredTable = {
         id: tableId,
-        columns: ["Column 1", "Column 2", "Column 3"],
-        rows: [
-          [{ text: "", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }],
-          [{ text: "", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }]
-        ]
+        columns: [""],
+        rows: [[{ text: "", styles: [] }]]
       };
 
       view.dispatch({
         changes: {
-          from: pendingCommand.from,
+          from: replacementFrom,
           to: pendingCommand.to,
-          insert: tableAnchor
+          insert: insertedTableAnchor
         },
-        selection: { anchor: pendingCommand.from + tableAnchor.length },
+        selection: { anchor: replacementFrom + insertedTableAnchor.length },
         scrollIntoView: true
       });
       setStructuredTables((currentTables) => {
@@ -3589,16 +4017,29 @@ function Editor() {
 
     if (commandName === "code") {
       const codeTemplate = "```python\nprint(\"Hello from x2pad\")\n```\n";
+      const commandLine = view.state.doc.lineAt(pendingCommand.from);
+      const textBeforeCommand = view.state.doc.sliceString(
+        commandLine.from,
+        pendingCommand.from
+      );
+      const hasExistingLineContent = textBeforeCommand.trim().length > 0;
+      const replacementFrom = hasExistingLineContent
+        ? commandLine.from + textBeforeCommand.trimEnd().length
+        : pendingCommand.from;
+      const codeBlockFrom = replacementFrom + (hasExistingLineContent ? 1 : 0);
+      const insertedCode = hasExistingLineContent
+        ? `\n${codeTemplate}`
+        : codeTemplate;
 
       view.dispatch({
         changes: {
-          from: pendingCommand.from,
+          from: replacementFrom,
           to: pendingCommand.to,
-          insert: codeTemplate
+          insert: insertedCode
         },
-        selection: { anchor: pendingCommand.from },
+        selection: { anchor: codeBlockFrom },
         effects: [
-          setSelectedCodeBox.of(pendingCommand.from),
+          setSelectedCodeBox.of(codeBlockFrom),
           setSelectedCodeBoxColumn.of(0),
           setEditingCodeBox.of(null)
         ],
@@ -3607,7 +4048,7 @@ function Editor() {
       setShowCommands(false);
       setCommandQuery("");
       setCodeRuns((currentRuns) => currentRuns.filter(
-        (output) => output.blockFrom !== pendingCommand.from
+        (output) => output.blockFrom !== codeBlockFrom
       ));
       return true;
     }
@@ -3678,7 +4119,7 @@ function Editor() {
     EditorView.lineWrapping,
     textStyleDecorations,
     commandLineDecorations,
-    structuredTableDecorations(structuredTablesRef.current),
+    structuredTableDecorations(structuredTablesRef),
     codeBoxDecorations,
     EditorView.inputHandler.of((view, _from, _to, text) => {
       const block = getSelectedPythonCodeBlock(view);
@@ -3702,6 +4143,13 @@ function Editor() {
       {
         key: "Enter",
         run: (view) => {
+          const selectedTable = getSelectedStructuredTableAnchor(view);
+
+          if (selectedTable) {
+            navigateStructuredTableCell({ tableId: selectedTable.id, rowIndex: 0, columnIndex: 0 });
+            return true;
+          }
+
           if (acceptAiSession(view) || enterSelectedPythonCodeBox(view)) {
             return true;
           }
@@ -3725,11 +4173,15 @@ function Editor() {
       },
       {
         key: "ArrowDown",
-        run: (view) => moveInsidePythonCodeBoxOneLine(view, "down") || moveOutsideCodeBoxOneLine(view, "down")
+        run: (view) => moveAroundStructuredTable(view, "down") ||
+          moveInsidePythonCodeBoxOneLine(view, "down") ||
+          moveOutsideCodeBoxOneLine(view, "down")
       },
       {
         key: "ArrowUp",
-        run: (view) => moveInsidePythonCodeBoxOneLine(view, "up") || moveOutsideCodeBoxOneLine(view, "up")
+        run: (view) => moveAroundStructuredTable(view, "up") ||
+          moveInsidePythonCodeBoxOneLine(view, "up") ||
+          moveOutsideCodeBoxOneLine(view, "up")
       },
       {
         key: "ArrowLeft",
@@ -3757,11 +4209,16 @@ function Editor() {
       },
       {
         key: "Backspace",
-        run: (view) => !!getSelectedPythonCodeBlock(view) || deleteListMarkerAtCursor(view)
+        run: (view) => deleteSelectedStructuredTable(view) ||
+          deleteSelectedPythonCodeBox(view) ||
+          keepDeletionInsideEmptyPythonCodeBox(view) ||
+          deleteListMarkerAtCursor(view)
       },
       {
         key: "Delete",
-        run: (view) => !!getSelectedPythonCodeBlock(view)
+        run: (view) => deleteSelectedStructuredTable(view) ||
+          deleteSelectedPythonCodeBox(view) ||
+          keepDeletionInsideEmptyPythonCodeBox(view)
       }
     ])),
     EditorView.updateListener.of((update) => {
@@ -3892,9 +4349,11 @@ function Editor() {
     aiSession,
     cancelAiSession,
     cycleAiPlacement,
+    deleteSelectedStructuredTable,
     runAiCommandAtCursor,
     runCommandAtCursor,
     runPythonBlockAtCursor,
+    navigateStructuredTableCell,
     tableRenderRevision
   ]);
 
@@ -4115,7 +4574,14 @@ function Editor() {
     const activeCell = activeStructuredCellRef.current;
 
     if (activeCell) {
-      scheduleStructuredCellFocus(activeCell);
+      if (structuredTableModeRef.current === "navigating") {
+        scheduleStructuredCellNavigation(
+          activeCell,
+          structuredTableSelectionModeRef.current
+        );
+      } else {
+        scheduleStructuredCellFocus(activeCell);
+      }
     }
   }, [tableRenderRevision]);
 
@@ -4145,6 +4611,7 @@ function Editor() {
     const handleCellFocus = (event: Event) => {
       const detail = (event as CustomEvent).detail as StructuredTableCellTarget;
       activeStructuredCellRef.current = detail;
+      structuredTableModeRef.current = "editing";
     };
 
     const handleCellKey = (event: Event) => {
@@ -4163,6 +4630,16 @@ function Editor() {
         return;
       }
 
+      if (detail.shiftKey && detail.key === "Tab") {
+        addStructuredTableColumn(detail.tableId, detail.columnIndex, Math.max(0, detail.rowIndex));
+        return;
+      }
+
+      if (detail.shiftKey && detail.key === "Enter") {
+        addStructuredTableRow(detail.tableId, detail.columnIndex, detail.rowIndex);
+        return;
+      }
+
       if (detail.commandName) {
         runStructuredTableCellCommand(
           detail.tableId,
@@ -4176,21 +4653,17 @@ function Editor() {
         return;
       }
 
-      if (detail.ctrlKey && detail.key === "Tab") {
-        addStructuredTableColumn(detail.tableId, detail.columnIndex, detail.rowIndex);
-        return;
-      }
-
       let targetRow = detail.rowIndex;
       let targetColumn = detail.columnIndex;
 
       if (detail.key === "Tab") {
-        targetColumn += detail.shiftKey ? -1 : 1;
+        if (!detail.shiftKey && detail.columnIndex === table.columns.length - 1) {
+          addStructuredTableColumn(detail.tableId, detail.columnIndex, Math.max(0, detail.rowIndex));
+          return;
+        }
 
-        if (targetColumn >= table.columns.length) {
-          targetColumn = 0;
-          targetRow += 1;
-        } else if (targetColumn < 0) {
+        targetColumn += detail.shiftKey ? -1 : 1;
+        if (targetColumn < 0) {
           targetColumn = table.columns.length - 1;
           targetRow -= 1;
         }
@@ -4204,7 +4677,7 @@ function Editor() {
       }
 
       if (targetRow >= table.rows.length) {
-        addStructuredTableRow(detail.tableId, targetColumn);
+        addStructuredTableRow(detail.tableId, targetColumn, detail.rowIndex);
         return;
       }
 
@@ -4229,9 +4702,157 @@ function Editor() {
 
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (aiSession?.status === "ready" && event.key === "Enter") {
-        const editorView = editorViewRef.current;
+      const editorView = editorViewRef.current;
+      const activeElement = document.activeElement;
+      const activeTableCell = activeElement instanceof HTMLElement
+        ? activeElement.closest<HTMLElement>(".structured-table-cell-editor")
+        : null;
+      const activeTableWrapper = activeElement instanceof HTMLElement
+        ? activeElement.closest<HTMLElement>(".structured-table-widget")
+        : null;
+      const activeCell = activeStructuredCellRef.current;
 
+      if (event.key === "Shift") {
+        tableShiftWasUsedRef.current = false;
+
+        if (
+          structuredTableModeRef.current === "navigating" &&
+          activeTableWrapper &&
+          activeCell
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        return;
+      }
+
+      if (event.shiftKey) {
+        tableShiftWasUsedRef.current = true;
+      }
+
+      if (
+        structuredTableModeRef.current === "navigating" &&
+        activeTableWrapper &&
+        activeCell &&
+        activeTableWrapper.dataset.tableId === activeCell.tableId
+      ) {
+        const table = structuredTablesRef.current.find((candidate) => candidate.id === activeCell.tableId);
+
+        if (event.key === "Backspace") {
+          const selectionMode = structuredTableSelectionModeRef.current;
+
+          event.preventDefault();
+          event.stopPropagation();
+          if (selectionMode === "row" || selectionMode === "column") {
+            if (selectionMode === "row") {
+              deleteStructuredTableRow(
+                activeCell.tableId,
+                activeCell.rowIndex,
+                activeCell.columnIndex
+              );
+            } else {
+              deleteStructuredTableColumn(
+                activeCell.tableId,
+                activeCell.rowIndex,
+                activeCell.columnIndex
+              );
+            }
+          }
+          return;
+        }
+
+        if (event.shiftKey && event.key === "Enter" && table) {
+          event.preventDefault();
+          event.stopPropagation();
+          addStructuredTableRow(
+            activeCell.tableId,
+            activeCell.columnIndex,
+            activeCell.rowIndex,
+            "navigating"
+          );
+          return;
+        }
+
+        if (event.shiftKey && event.key === "Tab" && table) {
+          event.preventDefault();
+          event.stopPropagation();
+          addStructuredTableColumn(
+            activeCell.tableId,
+            activeCell.columnIndex,
+            activeCell.rowIndex,
+            "navigating"
+          );
+          return;
+        }
+
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.stopPropagation();
+          moveStructuredTableCell(activeCell);
+          return;
+        }
+
+        if (event.key === "Escape" && editorView) {
+          const tableAnchor = getStructuredTableAnchorById(editorView.state.doc, activeCell.tableId);
+
+          if (tableAnchor) {
+            event.preventDefault();
+            event.stopPropagation();
+            activeStructuredCellRef.current = null;
+            structuredTableModeRef.current = null;
+            editorView.dispatch({
+              selection: { anchor: tableAnchor.from },
+              scrollIntoView: true
+            });
+            editorView.focus();
+            return;
+          }
+        }
+
+        const direction = event.key === "ArrowLeft" || (event.key === "Tab" && event.shiftKey)
+          ? "left"
+          : event.key === "ArrowRight" || event.key === "Tab"
+            ? "right"
+            : event.key === "ArrowUp"
+              ? "up"
+              : event.key === "ArrowDown"
+                ? "down"
+                : null;
+
+        if (table && direction) {
+          event.preventDefault();
+          event.stopPropagation();
+          const hasHeader = table.columns.some((column) => column.trim().length > 0);
+          const minimumRow = hasHeader ? -1 : 0;
+          let rowIndex = activeCell.rowIndex;
+          let columnIndex = activeCell.columnIndex;
+
+          if (direction === "left") columnIndex = Math.max(0, columnIndex - 1);
+          if (direction === "right") columnIndex = Math.min(table.columns.length - 1, columnIndex + 1);
+          if (direction === "up") rowIndex = Math.max(minimumRow, rowIndex - 1);
+          if (direction === "down") rowIndex = Math.min(table.rows.length - 1, rowIndex + 1);
+
+          navigateStructuredTableCell({ tableId: table.id, rowIndex, columnIndex });
+          return;
+        }
+      }
+
+      if (
+        event.key === "Escape" &&
+        structuredTableModeRef.current === "editing" &&
+        activeTableCell?.dataset.tableId
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        navigateStructuredTableCell({
+          tableId: activeTableCell.dataset.tableId,
+          rowIndex: Number(activeTableCell.dataset.rowIndex ?? 0),
+          columnIndex: Number(activeTableCell.dataset.columnIndex ?? 0)
+        });
+        return;
+      }
+
+      if (aiSession?.status === "ready" && event.key === "Enter") {
         if (editorView && document.activeElement !== editorView.contentDOM) {
           event.preventDefault();
           acceptAiSession(editorView);
@@ -4255,7 +4876,25 @@ function Editor() {
         return;
       }
 
-      const editorView = editorViewRef.current;
+      if (editorView && activeTableCell?.dataset.tableId) {
+        const tableAnchor = getStructuredTableAnchorById(
+          editorView.state.doc,
+          activeTableCell.dataset.tableId
+        );
+
+        if (tableAnchor) {
+          event.preventDefault();
+          event.stopPropagation();
+          activeStructuredCellRef.current = null;
+          editorView.dispatch({
+            selection: { anchor: tableAnchor.from },
+            scrollIntoView: true
+          });
+          editorView.focus();
+          return;
+        }
+      }
+
       const editorHasFocus = !!editorView && editorView.contentDOM.contains(document.activeElement);
       const cursorIsInCodeBox = !!editorView && (
         !!getSelectedPythonCodeBlock(editorView) ||
@@ -4269,13 +4908,16 @@ function Editor() {
         return;
       }
 
+      if (editorHasFocus && getSelectedStructuredTableAnchor(editorView)) {
+        return;
+      }
+
       if (showCommands) {
         setShowCommands(false);
         setCommandQuery("");
         return;
       }
 
-      const activeElement = document.activeElement;
       const sidebarElement = sidebarRef.current;
       const isInSidebar = !!activeElement && !!sidebarElement?.contains(activeElement);
 
@@ -4285,9 +4927,57 @@ function Editor() {
       }
     };
 
+    const handleKeyUp = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.key !== "Shift" ||
+        tableShiftWasUsedRef.current ||
+        structuredTableModeRef.current !== "navigating"
+      ) {
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      const activeTableWrapper = activeElement instanceof HTMLElement
+        ? activeElement.closest<HTMLElement>(".structured-table-widget")
+        : null;
+      const activeCell = activeStructuredCellRef.current;
+
+      if (!activeTableWrapper || !activeCell) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      const currentMode = structuredTableSelectionModeRef.current;
+      const nextMode: StructuredTableSelectionMode = currentMode === "cell"
+        ? "row"
+        : currentMode === "row"
+          ? "column"
+          : "cell";
+      selectStructuredTableRange(activeCell, nextMode);
+    };
+
     document.addEventListener("keydown", handleKeyDown, true);
-    return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, [acceptAiSession, aiSession, cancelAiSession, cycleAiPlacement, focusSidebarOnActiveNote, showCommands]);
+    document.addEventListener("keyup", handleKeyUp, true);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown, true);
+      document.removeEventListener("keyup", handleKeyUp, true);
+    };
+  }, [
+    acceptAiSession,
+    addStructuredTableColumn,
+    addStructuredTableRow,
+    aiSession,
+    cancelAiSession,
+    cycleAiPlacement,
+    deleteStructuredTableColumn,
+    deleteStructuredTableRow,
+    focusSidebarOnActiveNote,
+    moveStructuredTableCell,
+    navigateStructuredTableCell,
+    selectStructuredTableRange,
+    showCommands
+  ]);
 
   return (
     <div className="editor-shell">

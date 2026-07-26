@@ -78,7 +78,15 @@ The current implementation supports Python. C++ and other languages may be added
 The table feature is designed to help users structure information quickly without relying on mouse-heavy table editing tools. This is useful for lecture notes, comparison charts, planning, and lightweight calculations. The goal is to make table editing feel natural inside a keyboard-first note-taking environment.
 
 ### How It Works
-Users can create a three-column table using `//table`. Once a table is created, the arrow keys, `Tab`, and `Shift+Tab` can be used to move between cells. Pressing `Enter` moves down the current column and creates a new row when the user reaches the bottom of the table.
+Users can type `//table` to create a blank 1×1 table. The first cell opens immediately in editing mode so the user can begin typing without another command. Tables use three keyboard-operated interaction layers:
+
+1. **Document layer:** The whole table is outlined when the document cursor reaches it. Pressing `Enter` opens the table layer, the arrow keys move past the table, and `Backspace` deletes the entire selected table.
+2. **Table layer:** One cell is highlighted without placing a text cursor inside it. The arrow keys move the cell selection, `Enter` opens the selected cell for editing, and `Escape` returns to the document layer.
+3. **Cell layer:** The selected cell remains highlighted and contains the text cursor. `Escape` returns to the table layer, while cursor movement is kept inside the active cell.
+
+While editing a cell, `Tab` moves to the next column and adds a column when the cell is already at the right edge. `Enter` moves to the next row and adds a row when the cell is already on the bottom edge. `Shift+Tab` always inserts a column to the right of the current cell, and `Shift+Enter` always inserts a row below it. These two insertion shortcuts also work from the table layer and keep the newly created cell selected.
+
+In the table layer, tapping `Shift` cycles the selection from the current cell, to its entire row, to its entire column, and then back to the cell. Pressing `Backspace` while a row or column is selected deletes that row or column. A table always retains at least one row and one column.
 
 Tables also support calculations over spreadsheet-style cell ranges. For example, entering `//sum(A1:C3)` inside a table cell and pressing `Enter` replaces the formula with the calculated result. The supported operations are `sum`, `avg`, `mean`, `median`, `min`, `max`, and `count`.
 
