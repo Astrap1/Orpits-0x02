@@ -3,13 +3,13 @@ Team Name: 0x02
 
 Proposed Level of Achievement: Apollo 11
 
-Poster: https://drive.google.com/file/d/1HlmQSmKyazfOEh1AZi91UpB2ZltoFydT/view?usp=drive_link
+Poster: https://drive.google.com/file/d/1VtxDAiqvgk8WC8H-M8PDGw-QBULeJZDU/view?usp=drive_link
 
-Video: https://drive.google.com/file/d/1XQnf3WxhFC2shKk1xLNM-pZRd3zSfNJH/view?usp=drive_link
+Video:
 
-App Download: https://drive.google.com/file/d/1Xe2NOQxCawUEi9L9gnE2Ygp2jl3mmRxB/view?usp=drive_link
+App Download: https://drive.google.com/file/d/13d55TByjsLx1_P4X6ghkMNUxHNb1Sr73/view?usp=drive_link
 
-User Guide:
+User Guide: https://drive.google.com/file/d/1Lk3EA71SZVaiWFZ8eVLZcgR5WA8SdFdn/view?usp=drive_link
 
 # Motivation
 Modern note-taking apps often prioritise a "click-heavy" visual interface that disrupts the "flow state" of power users. For developers and students, the constant context-switching between the keyboard and mouse is an ergonomic bottleneck that slows down thought-to-text translation.
@@ -28,9 +28,9 @@ Ultimately, it provides a mouse-optional core editing workflow that reduces the 
 2. The Agile Developer
 - As a coder brainstorming logic, I want to type `//code` to insert a code box, run the snippet with `Ctrl+Enter`, and see the output in my notes so that I can verify my ideas immediately.
 3. The Academic Writer
-- As an essay writer, I want to type \\prompt to get instant AI feedback or expansion without leaving my editor.
+- As an essay writer, I want to type `\\prompt` to get instant AI feedback or expansion without leaving my editor.
 4. The Privacy Conscious User
-- As a user handling sensitive data, I want my notes saved locally in the .x2 format so that I have complete ownership over my files without relying on cloud storage.
+- As a user handling sensitive data, I want my notes saved locally in the `.x2` format so that I have complete ownership over my files without relying on cloud storage.
 5. The UI/UX Enthusiast
 - As a user who values aesthetics, I want a minimalist workspace with clean typography, rounded edges, and translucent sidebars so that the editor feels modern and unobtrusive.
 
@@ -525,6 +525,7 @@ The next milestone objectives are:
 
 - Improve structured-table accessibility, cell layout, and handling of larger tables
 - Add clearer visible controls for managing table rows and columns while preserving keyboard-first navigation and formulas
+- Implement fuzzy command search with Fuse.js so partial or imperfect command names can return useful suggestions
 - Add C++ execution to the code box
 - Allow users to select or identify the programming language used by each code box
 - Refine structured-table PDF export with better cell wrapping and page-break handling
@@ -563,23 +564,86 @@ The stress-test script performs deterministic logic checks; it does not simulate
 
 Automated checks were supplemented with complete editor workflows that require interaction with the desktop interface:
 
-| Area | Scenarios covered | What was verified |
-|---|---|---|
-| Commands and edge cases | Valid, incomplete, invalid, and pasted commands; command-like text inside code boxes | Commands execute without damaging unrelated text, while invalid input is ignored safely |
-| Save, load, and export | Plain and formatted notes, structured tables, multiple notes, invalid files, and PDF export | Editor state is preserved where supported and invalid files do not crash the app |
-| Cross-feature workflows | Formatting, commands, tables, code boxes, and AI-generated text used in the same note | Features continue to work together without breaking the writing workflow |
-| AI workflow | Normal, empty, slow, and failed requests; missing keys; insertion placement; cancellation | Status and error states behave safely and editing can continue |
-| Responsiveness | Longer notes, large pastes, repeated formatting, and command-menu use | Typing and common editor interactions remain usable without freezing |
+#### 1. Commands and Edge Cases
+
+We manually tested the typed-command workflow because it depends on cursor position, keyboard events, command-menu state, and visible editor updates that are difficult to evaluate through isolated helper tests alone.
+
+The scenarios included:
+
+- entering valid formatting commands such as `//bold`, `//header`, and `//color`;
+- entering insertion commands such as `//date`, `//time`, and `//wordcount`;
+- typing `//` without completing a command;
+- entering incomplete or invalid command names;
+- pasting text containing `//` or `\\`;
+- writing command-like text as part of an ordinary note; and
+- writing command-like text inside a Python code box.
+
+For each scenario, we checked that valid commands performed the intended action and removed only their own command text. Invalid or incomplete commands had to leave unrelated note content unchanged, and command-like text inside code boxes had to remain Python source rather than being interpreted as editor commands. We also checked that the command menu opened, filtered, closed, and returned focus to the editor as expected.
+
+#### 2. Saving, Loading, and Exporting
+
+Persistence testing covered complete file workflows rather than only JSON parsing. Notes were created, saved, closed, and reopened through the desktop interface.
+
+The test notes included:
+
+- plain text;
+- combinations of bold, italic, underline, strikethrough, colour, and font-size ranges;
+- Python code boxes;
+- structured tables with different numbers of rows and columns;
+- formatted table-cell content; and
+- multiple notes stored in the same selected folder.
+
+After reopening each note, we compared its title, text, formatting, code blocks, and table contents with the state before saving. We also opened invalid or unsupported files to confirm that the application displayed an error instead of replacing the current note or crashing.
+
+PDF export was tested separately because it transforms editor data into a different document format. We checked that the selected title and text appeared in the exported file, long content continued onto additional pages, supported text formatting remained visible, and structured tables were rendered as tables rather than internal table anchors.
+
+#### 3. Cross-Feature Workflows
+
+Individual features were also combined within the same note to identify conflicts between their interaction states. These workflows included applying formatting before and after inserting a table, placing code boxes near ordinary commands, inserting AI-generated text into a formatted document, saving the combined note, reopening it, and exporting it as a PDF.
+
+The purpose was to confirm that one feature did not disable or corrupt another. In particular, we checked that table navigation did not trap the document cursor, code-box commands did not trigger the main command registry, inserted AI text did not remove surrounding content, and saved or exported content matched the visible editor state where the format supports it.
+
+#### 4. AI Workflow
+
+The Gemini workflow was tested through the editor interface with normal prompts, empty or incomplete prompts, slow requests, failed requests, missing or invalid API keys, different insertion placements, and cancellation.
+
+We checked the transition between thinking, ready, and error states and confirmed that the user could continue editing after each outcome. For successful responses, we checked that `Tab` cycled through the available insertion positions and that `Enter` inserted the response at the selected location. For cancelled or failed requests, the existing note content had to remain unchanged.
+
+#### 5. Responsiveness
+
+Manual responsiveness testing used longer notes, large pasted text blocks, repeated formatting actions, command-menu searches, multiple code boxes, and larger structured tables. These checks focused on the experience of typing and navigating rather than a numerical performance benchmark.
+
+We observed whether typing remained usable, whether the command menu appeared without a disruptive delay, whether table and code-box navigation continued to respond, and whether the interface froze or crashed during repeated editing. The automated stress script complements these checks by exercising deterministic logic at higher volume, but it does not replace interaction-based observation.
 
 ## User Testing
 
 We conducted the first round of user testing with five participants. Each participant received the user guide linked above so they could learn the intended keyboard-first workflow before trying the application. Their feedback was then used to identify areas where the interface could better support different note-taking needs.
+
+### Participant Profiles
+
+Participants are identified anonymously as `P1` to `P5`.
+
+| Participant | Field of study | Relevant experience |
+|---|---|---|
+| P1 | Biomedical Engineering | Frequent note-taker |
+| P2 | Computer Engineering | Frequent note-taker and coder |
+| P3 | Business Analytics | Frequent note-taker and coder |
+| P4 | History | Frequent writer |
+| P5 | Data Science | Frequent note-taker |
+
+The participant group provided perspectives from frequent note-takers, writers, and coders across both technical and non-technical fields. However, all five participants were students, so the findings may not represent the needs of working professionals or other user groups. Future testing should include participants from a wider range of backgrounds.
 
 ### Finding: Default Table Size
 
 The original table design created a 3×3 table by default. Some participants found this unnecessarily large because they only needed a smaller table, such as 2×2, for simple notes and comparisons.
 
 Based on this feedback, we changed `//table` to create a 1×1 table. Users can then expand it only when needed: `Tab` adds or moves across columns, while `Enter` adds or moves across rows. This makes the default table less intrusive without limiting users who need larger tables.
+
+### Finding: Command Length
+
+Some participants found longer commands inconvenient to type, particularly when they could not remember the exact command name. Commands such as `//bulletlist` and `//wordcount` are descriptive, but entering the full name can interrupt the typing flow that x2pad is intended to preserve.
+
+This feedback supports the planned fuzzy-search feature for the next milestone. Fuse.js will be used to match partial or imperfect input against the command registry. For example, a user who types `//blt` could still be shown `//bulletlist`, while `//wrd` could suggest `//wordcount`. This will reduce the amount of typing required and make longer commands easier to discover without replacing the existing command names.
 
 ### Follow-up Areas
 
