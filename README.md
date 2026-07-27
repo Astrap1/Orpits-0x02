@@ -3,7 +3,7 @@ Team Name: 0x02
 
 Proposed Level of Achievement: Apollo 11
 
-Poster: https://drive.google.com/file/d/1PCGsbD5YgZIeLRuaLzokGgCyjn_-YJ1j/view?usp=drive_link
+Poster: https://drive.google.com/file/d/1VN_jcvvfEWkB6IHPJKemCIk_EEEjQR7I/view?usp=drive_link
 
 Video: https://drive.google.com/file/d/1USR5vzew6CawHmcj0dNNbAeUyoMUtGd3/view?usp=drive_link
 
