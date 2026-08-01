@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CommandRegistry, TEXT_COLOR_OPTIONS } from "../CommandRegistry";
+import { getCommandSuggestions } from "../CommandSearch";
 import "../styles/Editor.css";
 
 const DEFAULT_FONT_SIZE = "14";
@@ -59,6 +60,11 @@ interface AiModelPlacement {
 interface AiModelResponse {
   answer: string;
   placement?: AiModelPlacement;
+}
+
+interface CommandFeedback {
+  title: string;
+  detail: string;
 }
 
 const EMPTY_NOTE_TITLE = "Untitled Note";
@@ -2854,6 +2860,8 @@ function Editor() {
   const [showLogoPane, setShowLogoPane] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [commandFeedback, setCommandFeedback] = useState<CommandFeedback | null>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number; placement: "below" | "above" }>({
     top: 0,
     left: 0,
@@ -2889,14 +2897,17 @@ function Editor() {
 
   const activeNoteTitle = openedNoteTitle ?? EMPTY_NOTE_TITLE;
   const visibleCommands = useMemo(() => {
-    const query = commandQuery.trim().toLowerCase();
+    return getCommandSuggestions(commandQuery);
+  }, [commandQuery]);
 
-    if (!query) {
-      return CommandRegistry;
+  useEffect(() => {
+    if (!commandFeedback) {
+      return;
     }
 
-    return CommandRegistry.filter((command) => command.name.toLowerCase().startsWith(query));
-  }, [commandQuery]);
+    const timeout = window.setTimeout(() => setCommandFeedback(null), 2800);
+    return () => window.clearTimeout(timeout);
+  }, [commandFeedback]);
 
   const focusEditorAtStart = useCallback(() => {
     setShowLogoPane(false);
@@ -3943,16 +3954,17 @@ function Editor() {
     return true;
   }, [aiSession]);
 
-  const runCommandAtCursor = useCallback((view: EditorView) => {
+  const runCommandAtCursor = useCallback((view: EditorView, suggestedCommand?: (typeof CommandRegistry)[number]) => {
     const pendingCommand = getCommandAtCursor(view);
 
     if (!pendingCommand) {
       return false;
     }
 
-    const command = CommandRegistry.find(
+    const exactCommand = CommandRegistry.find(
       (registeredCommand) => registeredCommand.name.toLowerCase() === pendingCommand.name
     );
+    const command = exactCommand ?? suggestedCommand;
 
     if (!command) {
       return false;
@@ -4110,6 +4122,32 @@ function Editor() {
     return true;
   }, [activeNoteTitle, moveStructuredTableCell, openedNotePath, runFileCommand]);
 
+  const discardUnmatchedCommandAtCursor = useCallback((view: EditorView) => {
+    const pendingCommand = getCommandAtCursor(view);
+
+    if (!pendingCommand) {
+      return false;
+    }
+
+    const typedCommand = view.state.doc.sliceString(pendingCommand.from, pendingCommand.to).trim();
+    view.dispatch({
+      changes: {
+        from: pendingCommand.from,
+        to: pendingCommand.to,
+        insert: ""
+      },
+      selection: { anchor: pendingCommand.from }
+    });
+    setShowCommands(false);
+    setCommandQuery("");
+    setSelectedCommandIndex(0);
+    setCommandFeedback({
+      title: "Command not found",
+      detail: `${typedCommand} was removed - try another command`
+    });
+    return true;
+  }, []);
+
   const editorExtensions = useMemo(() => [
     markdown({
       codeLanguages: (info) => ["python", "py"].includes(info.toLowerCase())
@@ -4158,8 +4196,10 @@ function Editor() {
             return false;
           }
 
+          const selectedCommand = commandQuery ? visibleCommands[selectedCommandIndex] : undefined;
           return runAiCommandAtCursor(view) ||
-            runCommandAtCursor(view) ||
+            runCommandAtCursor(view, selectedCommand) ||
+            discardUnmatchedCommandAtCursor(view) ||
             continueListAtCursor(view);
         }
       },
@@ -4173,13 +4213,21 @@ function Editor() {
       },
       {
         key: "ArrowDown",
-        run: (view) => moveAroundStructuredTable(view, "down") ||
+        run: (view) => showCommands && !!commandQuery && visibleCommands.length > 0
+          ? (setSelectedCommandIndex((currentIndex) => (
+            (currentIndex + 1) % visibleCommands.length
+          )), true)
+          : moveAroundStructuredTable(view, "down") ||
           moveInsidePythonCodeBoxOneLine(view, "down") ||
           moveOutsideCodeBoxOneLine(view, "down")
       },
       {
         key: "ArrowUp",
-        run: (view) => moveAroundStructuredTable(view, "up") ||
+        run: (view) => showCommands && !!commandQuery && visibleCommands.length > 0
+          ? (setSelectedCommandIndex((currentIndex) => (
+            (currentIndex - 1 + visibleCommands.length) % visibleCommands.length
+          )), true)
+          : moveAroundStructuredTable(view, "up") ||
           moveInsidePythonCodeBoxOneLine(view, "up") ||
           moveOutsideCodeBoxOneLine(view, "up")
       },
@@ -4348,13 +4396,18 @@ function Editor() {
     acceptAiSession,
     aiSession,
     cancelAiSession,
+    commandQuery,
+    discardUnmatchedCommandAtCursor,
     cycleAiPlacement,
     deleteSelectedStructuredTable,
     runAiCommandAtCursor,
     runCommandAtCursor,
     runPythonBlockAtCursor,
     navigateStructuredTableCell,
-    tableRenderRevision
+    selectedCommandIndex,
+    showCommands,
+    tableRenderRevision,
+    visibleCommands
   ]);
 
   const onChange = useCallback((val: string, viewUpdate: any) => {
@@ -4368,6 +4421,7 @@ function Editor() {
     if (isInsideCommandExcludedBlock) {
       setShowCommands(false);
       setCommandQuery("");
+      setSelectedCommandIndex(0);
       return;
     }
 
@@ -4378,12 +4432,11 @@ function Editor() {
 
     if (commandMatch) {
       const nextCommandQuery = commandMatch[1].toLowerCase();
-      const nextVisibleCommandCount = nextCommandQuery
-        ? CommandRegistry.filter((command) => command.name.toLowerCase().startsWith(nextCommandQuery)).length
-        : CommandRegistry.length;
+      const nextVisibleCommandCount = getCommandSuggestions(nextCommandQuery).length;
 
       setShowCommands(true);
       setCommandQuery(nextCommandQuery);
+      setSelectedCommandIndex(0);
 
       const coords = viewUpdate.view.coordsAtPos(cursor);
       if (coords) {
@@ -4392,6 +4445,7 @@ function Editor() {
     } else {
       setShowCommands(false);
       setCommandQuery("");
+      setSelectedCommandIndex(0);
     }
   }, []);
 
@@ -5110,14 +5164,25 @@ function Editor() {
                   left: menuPos.left
                 }}
               >
-                {visibleCommands.length > 0 ? visibleCommands.map((command) => (
-                  <div className="command-menu-item" key={command.name}>
+                {visibleCommands.length > 0 ? visibleCommands.map((command, index) => (
+                  <button
+                    type="button"
+                    className={`command-menu-item ${index === selectedCommandIndex ? "selected" : ""}`}
+                    key={command.name}
+                    onMouseEnter={() => setSelectedCommandIndex(index)}
+                    onClick={() => {
+                      const editorView = editorViewRef.current;
+                      if (editorView) {
+                        runCommandAtCursor(editorView, command);
+                      }
+                    }}
+                  >
                     <code>//{command.name}</code>
                     <span>
                       {command.description}
                       {command.arguments ? `: ${command.arguments.join(", ")}` : ""}
                     </span>
-                  </div>
+                  </button>
                 )) : (
                   <div className="command-menu-empty">
                     No commands match //{commandQuery}
@@ -5143,6 +5208,20 @@ function Editor() {
                   <div className="ai-island-keys">
                     {aiSession.status === "ready" ? "Enter accept  Tab move  Esc cancel" : "Esc cancel"}
                   </div>
+                </div>
+              </div>
+            )}
+
+            {commandFeedback && (
+              <div
+                className={`command-feedback-island ${aiSession ? "with-ai-island" : ""}`}
+                role="status"
+                aria-live="polite"
+              >
+                <div className="command-feedback-mark" aria-hidden="true" />
+                <div className="ai-island-content">
+                  <div className="ai-island-title">{commandFeedback.title}</div>
+                  <div className="ai-island-detail">{commandFeedback.detail}</div>
                 </div>
               </div>
             )}
