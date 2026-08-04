@@ -4,7 +4,8 @@ import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import { pythonLanguage } from "@codemirror/lang-python";
 import { indentWithTab } from "@codemirror/commands";
-import { ChangeSet, Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
+import { ChangeSet, EditorState, Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
+import type { TransactionSpec } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, WidgetType } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -503,6 +504,19 @@ function getStructuredTableCellCommand(text: string) {
   };
 }
 
+function getStructuredTableColumnLabel(index: number) {
+  let label = "";
+  let value = index + 1;
+
+  while (value > 0) {
+    value -= 1;
+    label = String.fromCharCode(65 + (value % 26)) + label;
+    value = Math.floor(value / 26);
+  }
+
+  return label;
+}
+
 function createStructuredTableCellElement(tableId: string, rowIndex: number, columnIndex: number, cell: StructuredTableCell) {
   const cellElement = document.createElement("td");
   const editor = document.createElement("div");
@@ -585,10 +599,32 @@ class StructuredTableWidget extends WidgetType {
     wrapper.dataset.tableId = this.table.id;
     tableElement.className = "structured-table";
 
-    if (this.table.columns.some((column) => column.trim().length > 0)) {
-      const thead = document.createElement("thead");
-      const headerRow = document.createElement("tr");
+    const thead = document.createElement("thead");
+    const formulaHeaderRow = document.createElement("tr");
+    const cornerHeader = document.createElement("th");
 
+    cornerHeader.className = "structured-table-axis-corner";
+    cornerHeader.setAttribute("aria-hidden", "true");
+    formulaHeaderRow.append(cornerHeader);
+
+    this.table.columns.forEach((_, columnIndex) => {
+      const labelHeader = document.createElement("th");
+
+      labelHeader.className = "structured-table-axis-header";
+      labelHeader.textContent = getStructuredTableColumnLabel(columnIndex);
+      labelHeader.setAttribute("aria-label", `Formula column ${getStructuredTableColumnLabel(columnIndex)}`);
+      formulaHeaderRow.append(labelHeader);
+    });
+
+    thead.append(formulaHeaderRow);
+
+    if (this.table.columns.some((column) => column.trim().length > 0)) {
+      const headerRow = document.createElement("tr");
+      const headerCorner = document.createElement("th");
+
+      headerCorner.className = "structured-table-axis-corner";
+      headerCorner.setAttribute("aria-hidden", "true");
+      headerRow.append(headerCorner);
       this.table.columns.forEach((column, columnIndex) => {
         const header = document.createElement("th");
         const headerEditor = document.createElement("div");
@@ -641,12 +677,19 @@ class StructuredTableWidget extends WidgetType {
       });
 
       thead.append(headerRow);
-      tableElement.append(thead);
     }
+
+    tableElement.append(thead);
 
     const tbody = document.createElement("tbody");
     this.table.rows.forEach((row, rowIndex) => {
       const rowElement = document.createElement("tr");
+      const rowLabel = document.createElement("th");
+
+      rowLabel.className = "structured-table-axis-header structured-table-row-axis";
+      rowLabel.textContent = String(rowIndex + 1);
+      rowLabel.setAttribute("aria-label", `Formula row ${rowIndex + 1}`);
+      rowElement.append(rowLabel);
 
       this.table.columns.forEach((_, columnIndex) => {
         rowElement.append(createStructuredTableCellElement(
@@ -686,6 +729,18 @@ function getSelectedStructuredTableAnchor(view: EditorView) {
   return getStructuredTableAnchors(view.state.doc).find((anchor) => anchor.from === head) ?? null;
 }
 
+function getStructuredTableAnchorAtSelection(view: EditorView) {
+  const selection = view.state.selection.main;
+
+  return getStructuredTableAnchors(view.state.doc).find((anchor) => {
+    if (selection.empty) {
+      return anchor.from <= selection.head && selection.head <= anchor.to;
+    }
+
+    return selection.from <= anchor.to && selection.to >= anchor.from;
+  }) ?? null;
+}
+
 function buildStructuredTableDecorations(doc: Text, tables: StructuredTable[], selectionHead: number) {
   const builder = new RangeSetBuilder<Decoration>();
   const tableById = new Map(tables.map((table) => [table.id, table]));
@@ -699,7 +754,8 @@ function buildStructuredTableDecorations(doc: Text, tables: StructuredTable[], s
 
     builder.add(anchor.from, anchor.to, Decoration.replace({
       widget: new StructuredTableWidget(table, selectionHead === anchor.from),
-      block: true
+      block: true,
+      inclusive: true
     }));
   }
 
@@ -724,14 +780,14 @@ function structuredTableDecorations(
           selectionHead
         ),
         hasSelectedTable: getStructuredTableAnchors(state.doc).some(
-          (anchor) => anchor.from === selectionHead
+          (anchor) => anchor.from <= selectionHead && selectionHead <= anchor.to
         )
       };
     },
     update(previous, transaction) {
       const selectionHead = transaction.state.selection.main.head;
       const hasSelectedTable = getStructuredTableAnchors(transaction.state.doc).some(
-        (anchor) => anchor.from === selectionHead
+        (anchor) => anchor.from <= selectionHead && selectionHead <= anchor.to
       );
 
       if (transaction.docChanged || transaction.selection) {
@@ -820,6 +876,37 @@ function moveAroundStructuredTable(view: EditorView, direction: "up" | "down") {
   });
   return true;
 }
+
+const protectStructuredTableAnchors = EditorState.transactionFilter.of((transaction) => {
+  if (!transaction.docChanged) {
+    return transaction;
+  }
+
+  const anchors = getStructuredTableAnchors(transaction.startState.doc);
+  const replacements: TransactionSpec[] = [];
+
+  transaction.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    for (const anchor of anchors) {
+      const touchesAnchor = fromA <= anchor.to && toA >= anchor.from;
+
+      if (!touchesAnchor) {
+        continue;
+      }
+
+      const line = transaction.startState.doc.lineAt(anchor.from);
+      replacements.push({
+        changes: {
+          from: line.from,
+          to: line.to < transaction.startState.doc.length ? line.to + 1 : line.to,
+          insert: inserted.length > 0 ? inserted.toString() : ""
+        },
+        selection: { anchor: line.from }
+      });
+    }
+  });
+
+  return replacements.length > 0 ? replacements : transaction;
+});
 
 function removeTextRangeFromStyleRanges(ranges: TextStyleRange[], from: number, to: number) {
   const removedLength = to - from;
@@ -3331,7 +3418,7 @@ function Editor() {
   }, [navigateStructuredTableCell]);
 
   const deleteSelectedStructuredTable = useCallback((view: EditorView) => {
-    const tableAnchor = getSelectedStructuredTableAnchor(view);
+    const tableAnchor = getStructuredTableAnchorAtSelection(view);
 
     if (!tableAnchor) {
       return false;
@@ -4158,6 +4245,7 @@ function Editor() {
     textStyleDecorations,
     commandLineDecorations,
     structuredTableDecorations(structuredTablesRef),
+    protectStructuredTableAnchors,
     codeBoxDecorations,
     EditorView.inputHandler.of((view, _from, _to, text) => {
       const block = getSelectedPythonCodeBlock(view);

@@ -756,6 +756,29 @@ input {
   font-weight: 700;
 }
 
+.editor-stage .structured-table .structured-table-axis-corner,
+.editor-stage .structured-table .structured-table-axis-header {
+  width: 34px;
+  height: 24px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.025);
+  color: rgba(216, 224, 234, 0.62);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 24px;
+  text-align: center;
+  user-select: none;
+}
+
+.editor-stage .structured-table .structured-table-axis-corner {
+  background: transparent;
+}
+
+.editor-stage .structured-table .structured-table-row-axis {
+  width: 34px;
+  min-width: 34px;
+}
+
 .editor-stage .structured-table-cell-editor {
   min-height: 30px;
   padding: 6px 8px;
