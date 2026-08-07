@@ -339,27 +339,6 @@ Eg. when the user types `//bold`, x2pad recognises the command, removes `//bold`
 
 This design keeps the user in the typing flow because they do not need to stop and search through menus or memorise complex keyboard shortcuts.
 
-Command execution flow diagram:
-
-```mermaid
-flowchart TD
-    A[Type command] --> B[Detect command line]
-    B --> C[Show matching menu]
-    C --> D[Filter as user types]
-    D --> E{Enter pressed}
-    E --> F{Command type}
-    F -->|Registry| G[Run command action]
-    F -->|Editor feature| H[Run editor handler]
-    F -->|Native feature| I[Call Tauri backend]
-    F -->|Invalid| J[Show feedback]
-    G --> K[Remove command text]
-    H --> K
-    I --> L[Return result]
-    L --> K
-    J --> M[Keep note safe]
-    K --> N[Update editor state]
-```
-
 ## 4. How Tables Work
 Tables are stored as structured data within the `.x2` note. The document content contains an anchor such as `[[x2-table:<id>]]`, and the matching table object stores its columns, rows, cell text, and cell formatting. A CodeMirror widget renders the matching structured table at the anchor's location.
 
@@ -372,34 +351,6 @@ The frontend processes a table as follows:
 5. The formula parser validates supported operations and cell ranges, collects numeric values from the structured table, and replaces a valid formula with its result.
 
 Unlike Python execution, table editing and calculations do not require the Rust backend because they modify frontend state. When a note is saved, the frontend sends the table data together with the title, document content, and text style ranges to the Rust backend for serialisation in the `.x2` file.
-
-Table interaction activity diagram:
-
-```mermaid
-flowchart TD
-    A[Type //table] --> B[Insert table anchor]
-    B --> C[Create table data]
-    C --> D[Render table widget]
-    D --> E{Interaction}
-    E -->|Select table| F[Document mode]
-    E -->|Select cell| G[Cell mode]
-    F -->|Delete| H[Remove table]
-    G --> I{Cell input}
-    I -->|Text| J[Update cell]
-    I -->|Tab| K[Next cell]
-    I -->|Shift+Tab| L[Previous cell]
-    I -->|Enter| M[Next row or new row]
-    I -->|Ctrl+Tab| N[New column]
-    I -->|Formula| O[Calculate result]
-    I -->|Format command| P[Apply cell style]
-    J --> G
-    K --> G
-    L --> G
-    M --> G
-    N --> G
-    O --> G
-    P --> G
-```
 
 ## 5. How Code Execution Works
 The code box demonstrates why x2pad separates editor behaviour from native desktop operations. CodeMirror and React provide the interactive editing experience, while Rust handles the operating-system process required to execute Python.
@@ -417,27 +368,6 @@ The code execution flow works like this:
 The backend first attempts to use the Windows Python launcher through `py -3` and then falls back to the `python` command. To prevent a faulty or excessively verbose snippet from running without control, execution is stopped after five seconds and each output stream is limited to 256 KiB. Failures such as an empty code box, unavailable Python installation, runtime error, timeout, or truncated output are returned as controlled messages instead of crashing the editor.
 
 This design keeps process execution outside the browser-based frontend while allowing the result to remain part of the user's writing workflow.
-
-Code box execution flow diagram:
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Editor
-    participant Tauri
-    participant Rust
-    participant Python
-    User->>Editor: Type //code
-    Editor->>Editor: Insert Python block
-    User->>Editor: Press Ctrl+Enter
-    Editor->>Editor: Extract active block
-    Editor->>Tauri: run_python_snippet(code)
-    Tauri->>Rust: Send code
-    Rust->>Python: Run with timeout
-    Python-->>Rust: stdout, stderr, exit code
-    Rust-->>Editor: Return result
-    Editor-->>User: Show output
-```
 
 ## 6. How Saving and Loading Works
 x2pad uses a local-first saving system based on the `.x2` file format. This allows users to store their notes directly on their own device.
@@ -460,24 +390,6 @@ The loading flow works like this:
 6. The saved formatting and structured tables are restored inside the editor.
 
 This system allows x2pad to preserve the user's writing, formatting applied through typed commands, and structured tables.
-
-Save and export flow diagram:
-
-```mermaid
-flowchart TD
-    A[Type //save or //export] --> B[Collect note data]
-    B --> C[Open save dialog]
-    C --> D{Path chosen?}
-    D -->|No| E[Keep note unchanged]
-    D -->|Yes| F{Command}
-    F -->|Save| G[Serialize .x2 JSON]
-    G --> H[Write .x2 file]
-    F -->|Export| I[Render PDF]
-    I --> J[Write PDF file]
-    H --> K[Show saved status]
-    J --> L[Show exported status]
-    E --> M[Close dialog]
-```
 
 ## 7. How AI Requests Are Handled
 The `\\` AI registry is designed to let users request AI assistance without leaving the editor. Unlike a simple chatbot prompt, x2pad can send the user's prompt together with document context so that the AI response is aware of what the user is currently working on.
@@ -611,68 +523,6 @@ The milestone objectives are:
 
 # Current Milestone Progress
 The code-box, structured-table, version 2 `.x2` persistence, and first-round user-testing objectives are complete. Five participants tested the application using the user guide, and their feedback has started to inform design changes. The detailed findings are recorded in the User Testing section.
-
-## Milestone Progress Timeline
-
-### Milestone 1: Core Notepad
-- Built the base editor interface.
-- Added CodeMirror as the main writing area.
-- Added basic note typing and editor layout.
-- Created the foundation for keyboard-first interaction.
-
-### Milestone 2: `//` Command Registry
-- Added typed commands such as `//bold`, `//italic`, `//title`, `//header`, and `//body`.
-- Built the command menu.
-- Centralised command definitions in `CommandRegistry.ts`.
-- Added command filtering as the user types.
-
-### Milestone 3: AI Prompting
-- Added `\\` prompt detection.
-- Integrated Gemini API support.
-- Added AI response placement controls.
-- Added missing or invalid API-key handling.
-- Kept normal note-taking local unless the AI feature is used.
-
-### Milestone 4: Save, Load, and Export
-- Added `.x2` local file saving.
-- Added opening and loading `.x2` files.
-- Added folder-based note loading in the sidebar.
-- Added PDF export.
-- Added native desktop file dialogs through Tauri.
-
-### Milestone 5: Code Box
-- Added the `//code` command.
-- Inserted Python code boxes into notes.
-- Added Python syntax highlighting.
-- Added `Ctrl+Enter` execution.
-- Added `stdout`, `stderr`, and exit-code output.
-- Added backend Python execution through Rust/Tauri.
-- Added timeout and output-size safeguards.
-
-### Milestone 6: Structured Tables
-- Added the `//table` command.
-- Added editable table widgets inside the editor.
-- Added keyboard navigation for rows and columns.
-- Added row and column creation.
-- Added A/B/C column labels and 1/2/3 row labels so formulas are easier to write.
-- Added formulas such as `//sum`, `//avg`, `//min`, `//max`, and `//count`.
-- Added support for formatting inside table cells.
-- Added `.x2` version 2 table persistence.
-- Added PDF export support for structured tables.
-
-### Milestone 7: Fuzzy Search
-- Added Fuse.js for better command searching.
-- Added `CommandSearch.ts`.
-- Added prefix, abbreviation, and fuzzy command matching.
-- Added keyboard selection in the command menu.
-- Added invalid-command feedback.
-
-### Milestone 8: Testing and Refinement
-- Added stress testing.
-- Ran frontend and backend verification.
-- Conducted user testing with five participants.
-- Changed the default table size based on feedback.
-- Improved table deletion behaviour to prevent raw table anchors from appearing.
 
 # Next Milestone Objectives
 For the next milestone, our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
