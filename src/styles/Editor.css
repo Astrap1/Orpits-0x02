@@ -758,6 +758,7 @@ input {
 
 .editor-stage .structured-table .structured-table-axis-corner,
 .editor-stage .structured-table .structured-table-axis-header {
+  display: none;
   width: 34px;
   height: 24px;
   padding: 0;
@@ -768,6 +769,19 @@ input {
   line-height: 24px;
   text-align: center;
   user-select: none;
+}
+
+.editor-stage .structured-table .structured-table-formula-axis-row {
+  display: none;
+}
+
+.editor-stage .structured-table-widget:focus-within .structured-table .structured-table-formula-axis-row {
+  display: table-row;
+}
+
+.editor-stage .structured-table-widget:focus-within .structured-table .structured-table-axis-corner,
+.editor-stage .structured-table-widget:focus-within .structured-table .structured-table-axis-header {
+  display: table-cell;
 }
 
 .editor-stage .structured-table .structured-table-axis-corner {
@@ -826,13 +840,20 @@ input {
 }
 
 .editor-stage .cm-code-box-header::before {
-  content: "Python";
   color: #dffbff;
   font-family: Inter, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   font-size: 11px;
   font-weight: 760;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.editor-stage .cm-code-box-header.cm-code-box-language-python::before {
+  content: "Python";
+}
+
+.editor-stage .cm-code-box-header.cm-code-box-language-cpp::before {
+  content: "C++";
 }
 
 .editor-stage .cm-code-box-header::after {

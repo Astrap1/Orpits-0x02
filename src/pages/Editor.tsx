@@ -2,8 +2,9 @@ import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import type { FormEvent, KeyboardEvent, MutableRefObject } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
+import { cppLanguage } from "@codemirror/lang-cpp";
 import { pythonLanguage } from "@codemirror/lang-python";
-import { indentWithTab } from "@codemirror/commands";
+import { indentWithTab, invertedEffects } from "@codemirror/commands";
 import { ChangeSet, EditorState, Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import type { TransactionSpec } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, WidgetType } from "@codemirror/view";
@@ -19,7 +20,7 @@ const COMMAND_MENU_MAX_HEIGHT = 360;
 const COMMAND_MENU_VERTICAL_GAP = 8;
 const COMMAND_MENU_PADDING = 16;
 const COMMAND_MENU_ITEM_HEIGHT = 41;
-const COMMANDS_WITH_ARGUMENTS = new Set(["color", "size"]);
+const COMMANDS_WITH_ARGUMENTS = new Set(["code", "color", "size"]);
 const BULLET_LIST_MARKER = "\u2022 ";
 const BROWSER_GEMINI_API_KEY_STORAGE_KEY = "x2pad.geminiApiKey";
 const GEMINI_MODEL = "gemini-3.5-flash";
@@ -109,7 +110,10 @@ interface LoadedX2Folder {
   activePath: string;
 }
 
-interface PythonCodeBlock {
+type CodeLanguage = "python" | "cpp";
+
+interface CodeBlock {
+  language: CodeLanguage;
   code: string;
   blockFrom: number;
   blockTo: number;
@@ -123,6 +127,7 @@ interface CodeRunResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  phase: "compile" | "run";
 }
 
 interface CodeRunState {
@@ -603,6 +608,7 @@ class StructuredTableWidget extends WidgetType {
     const formulaHeaderRow = document.createElement("tr");
     const cornerHeader = document.createElement("th");
 
+    formulaHeaderRow.className = "structured-table-formula-axis-row";
     cornerHeader.className = "structured-table-axis-corner";
     cornerHeader.setAttribute("aria-hidden", "true");
     formulaHeaderRow.append(cornerHeader);
@@ -1149,7 +1155,7 @@ function buildCommandLineDecorations(doc: Text) {
   const builder = new RangeSetBuilder<Decoration>();
   const commandTokenPattern = /(\/\/[a-z]*)(?:\s+([^/\s]+))?/gi;
   const aiCommandPattern = /\\\\.+/g;
-  const codeBlocks = getPythonCodeBlocks(doc);
+  const codeBlocks = getCodeBlocks(doc);
   const tables = getMarkdownTables(doc);
 
   for (let index = 1; index <= doc.lines; index += 1) {
@@ -1315,6 +1321,42 @@ const tableDecorations = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field)
 });
 
+const removeStructuredTableFromHistory = StateEffect.define<StructuredTable>();
+const restoreStructuredTableFromHistory = StateEffect.define<StructuredTable>();
+const structuredTableHistory = invertedEffects.of((transaction) => {
+  const inverseEffects: StateEffect<unknown>[] = [];
+
+  for (const effect of transaction.effects) {
+    if (effect.is(removeStructuredTableFromHistory)) {
+      inverseEffects.push(restoreStructuredTableFromHistory.of(effect.value));
+    } else if (effect.is(restoreStructuredTableFromHistory)) {
+      inverseEffects.push(removeStructuredTableFromHistory.of(effect.value));
+    }
+  }
+
+  return inverseEffects;
+});
+
+function applyStructuredTableHistoryEffects(
+  tables: StructuredTable[],
+  effects: readonly StateEffect<unknown>[]
+) {
+  let nextTables = tables;
+
+  for (const effect of effects) {
+    if (effect.is(removeStructuredTableFromHistory)) {
+      nextTables = nextTables.filter((table) => table.id !== effect.value.id);
+    } else if (effect.is(restoreStructuredTableFromHistory)) {
+      nextTables = normalizeStructuredTables([
+        ...nextTables.filter((table) => table.id !== effect.value.id),
+        effect.value
+      ]);
+    }
+  }
+
+  return nextTables;
+}
+
 const setSelectedCodeBox = StateEffect.define<number | null>();
 const setSelectedCodeBoxColumn = StateEffect.define<number>();
 const setEditingCodeBox = StateEffect.define<number | null>();
@@ -1405,12 +1447,12 @@ class CodeBoxOutputWidget extends WidgetType {
   }
 }
 
-const idleCodeOutput = (): CodeRunState => ({
+const idleCodeOutput = (language: CodeLanguage): CodeRunState => ({
   status: "idle",
   stdout: "",
   stderr: "",
   exitCode: null,
-  message: "Not run yet. Press Ctrl+Enter to run this Python box."
+  message: `Not run yet. Press Ctrl+Enter to run this ${getCodeLanguageLabel(language)} box.`
 });
 
 function buildCodeBoxDecorations(
@@ -1419,7 +1461,7 @@ function buildCodeBoxDecorations(
 ) {
   const builder = new RangeSetBuilder<Decoration>();
 
-  for (const block of getPythonCodeBlocks(doc)) {
+  for (const block of getCodeBlocks(doc)) {
     const isSelected = presentation.selectedBlockFrom === block.blockFrom;
     const isEditing = !isSelected && presentation.editingBlockFrom === block.blockFrom;
     const modeClass = isSelected ? " cm-code-box-selected" : isEditing ? " cm-code-box-editing" : "";
@@ -1429,7 +1471,7 @@ function buildCodeBoxDecorations(
     for (let lineNumber = openingLine.number; lineNumber <= closingLine.number; lineNumber += 1) {
       const line = doc.line(lineNumber);
       const partClass = lineNumber === openingLine.number
-        ? "cm-code-box-header"
+        ? `cm-code-box-header cm-code-box-language-${block.language}`
         : lineNumber === closingLine.number
           ? "cm-code-box-footer"
           : "cm-code-box-source";
@@ -1440,7 +1482,7 @@ function buildCodeBoxDecorations(
       );
     }
 
-    const output = presentation.outputs.find((item) => item.blockFrom === block.blockFrom) ?? idleCodeOutput();
+    const output = presentation.outputs.find((item) => item.blockFrom === block.blockFrom) ?? idleCodeOutput(block.language);
     builder.add(
       block.blockTo,
       block.blockTo,
@@ -1509,10 +1551,10 @@ const codeBoxDecorations = StateField.define<CodeBoxDecorationState>({
       const selectionHead = transaction.state.selection.main.head;
       const selectedBlock = selectedBlockFrom === null
         ? null
-        : getPythonCodeBlocks(transaction.state.doc).find(
+        : getCodeBlocks(transaction.state.doc).find(
             (block) => block.blockFrom === selectedBlockFrom
           ) ?? null;
-      const editingBlock = getPythonCodeBlockAtPosition(transaction.state.doc, selectionHead);
+      const editingBlock = getCodeBlockAtPosition(transaction.state.doc, selectionHead);
 
       if (!selectedBlock || selectionHead !== selectedBlock.blockFrom) {
         selectedBlockFrom = null;
@@ -1535,18 +1577,18 @@ const codeBoxDecorations = StateField.define<CodeBoxDecorationState>({
   provide: (field) => EditorView.decorations.from(field, (value) => value.decorations)
 });
 
-function getSelectedPythonCodeBlock(view: EditorView) {
+function getSelectedCodeBlock(view: EditorView) {
   const selectedBlockFrom = view.state.field(codeBoxDecorations).selectedBlockFrom;
   return selectedBlockFrom === null || view.state.selection.main.head !== selectedBlockFrom
     ? null
-    : getPythonCodeBlocks(view.state.doc).find((block) => block.blockFrom === selectedBlockFrom) ?? null;
+    : getCodeBlocks(view.state.doc).find((block) => block.blockFrom === selectedBlockFrom) ?? null;
 }
 
-function getEditingPythonCodeBlock(view: EditorView) {
+function getEditingCodeBlock(view: EditorView) {
   const editingBlockFrom = view.state.field(codeBoxDecorations).editingBlockFrom;
   const block = editingBlockFrom === null
     ? null
-    : getPythonCodeBlocks(view.state.doc).find((candidate) => candidate.blockFrom === editingBlockFrom) ?? null;
+    : getCodeBlocks(view.state.doc).find((candidate) => candidate.blockFrom === editingBlockFrom) ?? null;
 
   if (
     !block ||
@@ -1559,7 +1601,7 @@ function getEditingPythonCodeBlock(view: EditorView) {
   return block;
 }
 
-function selectPythonCodeBox(view: EditorView, block: PythonCodeBlock) {
+function selectCodeBox(view: EditorView, block: CodeBlock) {
   const cursorLine = view.state.doc.lineAt(view.state.selection.main.head);
   const selectedColumn = view.state.selection.main.head - cursorLine.from;
   view.dispatch({
@@ -1574,8 +1616,8 @@ function selectPythonCodeBox(view: EditorView, block: PythonCodeBlock) {
   return true;
 }
 
-function enterSelectedPythonCodeBox(view: EditorView) {
-  const block = getSelectedPythonCodeBlock(view);
+function enterSelectedCodeBox(view: EditorView) {
+  const block = getSelectedCodeBlock(view);
 
   if (!block) {
     return false;
@@ -1592,8 +1634,8 @@ function enterSelectedPythonCodeBox(view: EditorView) {
   return true;
 }
 
-function deleteSelectedPythonCodeBox(view: EditorView) {
-  const block = getSelectedPythonCodeBlock(view);
+function deleteSelectedCodeBox(view: EditorView) {
+  const block = getSelectedCodeBlock(view);
 
   if (!block) {
     return false;
@@ -1616,19 +1658,19 @@ function deleteSelectedPythonCodeBox(view: EditorView) {
   return true;
 }
 
-function keepDeletionInsideEmptyPythonCodeBox(view: EditorView) {
+function keepDeletionInsideEmptyCodeBox(view: EditorView) {
   const selection = view.state.selection.main;
 
   if (!selection.empty) {
     return false;
   }
 
-  const block = getEditingPythonCodeBlock(view);
+  const block = getEditingCodeBlock(view);
   return !!block && block.code.length === 0 && selection.head === block.from;
 }
 
-function movePastSelectedPythonCodeBox(view: EditorView, direction: "up" | "down") {
-  const block = getSelectedPythonCodeBlock(view);
+function movePastSelectedCodeBox(view: EditorView, direction: "up" | "down") {
+  const block = getSelectedCodeBlock(view);
 
   if (!block) {
     return false;
@@ -1682,11 +1724,11 @@ function moveOutsideCodeBoxOneLine(view: EditorView, direction: "up" | "down") {
     return false;
   }
 
-  if (getSelectedPythonCodeBlock(view)) {
-    return movePastSelectedPythonCodeBox(view, direction);
+  if (getSelectedCodeBlock(view)) {
+    return movePastSelectedCodeBox(view, direction);
   }
 
-  if (getPythonSourceBlockAtSelection(view)) {
+  if (getCodeSourceBlockAtSelection(view)) {
     return false;
   }
 
@@ -1698,10 +1740,10 @@ function moveOutsideCodeBoxOneLine(view: EditorView, direction: "up" | "down") {
   }
 
   const targetLine = view.state.doc.line(targetLineNumber);
-  const targetBlock = getPythonCodeBlockAtPosition(view.state.doc, targetLine.from);
+  const targetBlock = getCodeBlockAtPosition(view.state.doc, targetLine.from);
 
   if (targetBlock) {
-    return selectPythonCodeBox(view, targetBlock);
+    return selectCodeBox(view, targetBlock);
   }
 
   const column = selection.head - cursorLine.from;
@@ -1714,25 +1756,25 @@ function moveOutsideCodeBoxOneLine(view: EditorView, direction: "up" | "down") {
   return true;
 }
 
-function returnToSelectedPythonCodeBox(view: EditorView) {
-  const block = getEditingPythonCodeBlock(view) ?? getPythonCodeBlockAtPosition(
+function returnToSelectedCodeBox(view: EditorView) {
+  const block = getEditingCodeBlock(view) ?? getCodeBlockAtPosition(
     view.state.doc,
     view.state.selection.main.head
   );
-  return block ? selectPythonCodeBox(view, block) : false;
+  return block ? selectCodeBox(view, block) : false;
 }
 
-function getPythonSourceBlockAtSelection(view: EditorView) {
+function getCodeSourceBlockAtSelection(view: EditorView) {
   const selection = view.state.selection.main;
 
-  return getPythonCodeBlocks(view.state.doc).find((block) => (
+  return getCodeBlocks(view.state.doc).find((block) => (
     block.from <= selection.from && selection.to <= block.to
   )) ?? null;
 }
 
-function moveInsidePythonCodeBoxOneLine(view: EditorView, direction: "up" | "down") {
+function moveInsideCodeBoxOneLine(view: EditorView, direction: "up" | "down") {
   const selection = view.state.selection.main;
-  const block = getPythonSourceBlockAtSelection(view);
+  const block = getCodeSourceBlockAtSelection(view);
 
   if (!block) {
     return false;
@@ -1761,9 +1803,9 @@ function moveInsidePythonCodeBoxOneLine(view: EditorView, direction: "up" | "dow
   return true;
 }
 
-function keepHorizontalArrowInsidePythonCodeBox(view: EditorView, direction: "left" | "right") {
+function keepHorizontalArrowInsideCodeBox(view: EditorView, direction: "left" | "right") {
   const selection = view.state.selection.main;
-  const block = getPythonSourceBlockAtSelection(view);
+  const block = getCodeSourceBlockAtSelection(view);
 
   if (!block || !selection.empty) {
     return false;
@@ -1772,9 +1814,9 @@ function keepHorizontalArrowInsidePythonCodeBox(view: EditorView, direction: "le
   return direction === "left" ? selection.head === block.from : selection.head === block.to;
 }
 
-function indentInsidePythonCodeBox(view: EditorView) {
+function indentInsideCodeBox(view: EditorView) {
   const selection = view.state.selection.main;
-  const block = getPythonSourceBlockAtSelection(view);
+  const block = getCodeSourceBlockAtSelection(view);
 
   if (!block || selection.from < block.from || selection.to > block.to) {
     return false;
@@ -1790,7 +1832,7 @@ function getCommandAtCursor(view: EditorView) {
     return null;
   }
 
-  if (getPythonCodeBlockAtPosition(view.state.doc, selection.head)) {
+  if (getCodeBlockAtPosition(view.state.doc, selection.head)) {
     return null;
   }
 
@@ -1825,7 +1867,7 @@ function getAiCommandAtCursor(view: EditorView) {
     return null;
   }
 
-  if (getPythonCodeBlockAtPosition(view.state.doc, selection.head)) {
+  if (getCodeBlockAtPosition(view.state.doc, selection.head)) {
     return null;
   }
 
@@ -1856,20 +1898,51 @@ function getAiCommandAtCursor(view: EditorView) {
   };
 }
 
-function getPythonCodeBlocks(doc: Text): PythonCodeBlock[] {
+function normalizeCodeLanguage(language?: string): CodeLanguage | null {
+  const normalized = language?.trim().toLowerCase();
+
+  if (!normalized || normalized === "python" || normalized === "py") {
+    return "python";
+  }
+
+  if (normalized === "c++" || normalized === "cpp") {
+    return "cpp";
+  }
+
+  return null;
+}
+
+function getCodeLanguageLabel(language: CodeLanguage) {
+  return language === "cpp" ? "C++" : "Python";
+}
+
+function getCodeTemplate(language: CodeLanguage) {
+  return language === "cpp"
+    ? "```cpp\n#include <iostream>\n\nint main() {\n    std::cout << \"Hello from x2pad\";\n    return 0;\n}\n```\n"
+    : "```python\nprint(\"Hello from x2pad\")\n```\n";
+}
+
+function getCodeBlocks(doc: Text): CodeBlock[] {
   const documentText = doc.toString();
-  const fencePattern = /```python\s*\n([\s\S]*?)\n```/gi;
-  const blocks: PythonCodeBlock[] = [];
+  const fencePattern = /```(python|py|cpp|c\+\+)\s*\n([\s\S]*?)\n```/gi;
+  const blocks: CodeBlock[] = [];
 
   for (const match of documentText.matchAll(fencePattern)) {
     const blockFrom = match.index ?? 0;
     const fullText = match[0] ?? "";
-    const code = match[1] ?? "";
+    const language = normalizeCodeLanguage(match[1]);
+    const code = match[2] ?? "";
+
+    if (!language) {
+      continue;
+    }
+
     const openingLineEnd = fullText.indexOf("\n");
     const codeFrom = blockFrom + openingLineEnd + 1;
     const codeTo = codeFrom + code.length;
     const blockTo = blockFrom + fullText.length;
     blocks.push({
+      language,
       code,
       blockFrom,
       blockTo,
@@ -1883,8 +1956,8 @@ function getPythonCodeBlocks(doc: Text): PythonCodeBlock[] {
   return blocks;
 }
 
-function getPythonCodeBlockAtPosition(doc: Text, position: number) {
-  return getPythonCodeBlocks(doc).find(
+function getCodeBlockAtPosition(doc: Text, position: number) {
+  return getCodeBlocks(doc).find(
     (block) => block.blockFrom <= position && position <= block.blockTo
   ) ?? null;
 }
@@ -3432,15 +3505,13 @@ function Editor() {
     activeStructuredCellRef.current = null;
     structuredTableModeRef.current = null;
     structuredTableSelectionModeRef.current = "cell";
-    const nextTables = structuredTablesRef.current.filter(
-      (table) => table.id !== tableAnchor.id
+    const table = structuredTablesRef.current.find(
+      (candidate) => candidate.id === tableAnchor.id
     );
-    structuredTablesRef.current = nextTables;
-    setStructuredTables(nextTables);
-    setTableRenderRevision((revision) => revision + 1);
     view.dispatch({
       changes: { from: tableLine.from, to: deleteTo, insert: "" },
       selection: { anchor: tableLine.from },
+      effects: table ? removeStructuredTableFromHistory.of(table) : undefined,
       scrollIntoView: true
     });
     setFileStatus("Table deleted.");
@@ -3783,10 +3854,10 @@ function Editor() {
   }, []);
   void runTableFormulaAtCursor;
 
-  const runPythonBlockAtCursor = useCallback((view: EditorView) => {
-    const selectedBlock = getSelectedPythonCodeBlock(view);
-    const editingBlock = getEditingPythonCodeBlock(view);
-    const codeBlock = selectedBlock ?? editingBlock ?? getPythonCodeBlockAtPosition(
+  const runCodeBlockAtCursor = useCallback((view: EditorView) => {
+    const selectedBlock = getSelectedCodeBlock(view);
+    const editingBlock = getEditingCodeBlock(view);
+    const codeBlock = selectedBlock ?? editingBlock ?? getCodeBlockAtPosition(
       view.state.doc,
       view.state.selection.main.head
     );
@@ -3794,6 +3865,8 @@ function Editor() {
     if (!codeBlock) {
       return false;
     }
+
+    const languageLabel = getCodeLanguageLabel(codeBlock.language);
 
     const runId = crypto.randomUUID();
     const setInitialBlockOutput = (output: CodeRunState) => {
@@ -3816,7 +3889,7 @@ function Editor() {
         stdout: "",
         stderr: "",
         exitCode: null,
-        message: "Running Python requires the x2pad desktop app."
+        message: `Running ${languageLabel} requires the x2pad desktop app.`
       });
       return true;
     }
@@ -3826,12 +3899,13 @@ function Editor() {
       stdout: "",
       stderr: "",
       exitCode: null,
-      message: "Running Python..."
+      message: `Running ${languageLabel}...`
     });
 
     void (async () => {
       try {
-        const result = await invoke<CodeRunResult>("run_python_snippet", {
+        const result = await invoke<CodeRunResult>("run_code_snippet", {
+          language: codeBlock.language,
           code: codeBlock.code
         });
         const hasError = result.exitCode === null || result.exitCode !== 0;
@@ -3843,10 +3917,12 @@ function Editor() {
           stderr: result.stderr,
           exitCode: result.exitCode,
           message: hasError
-            ? "Python finished with errors."
+            ? result.phase === "compile"
+              ? `${languageLabel} compilation failed.`
+              : `${languageLabel} finished with errors.`
             : hasWarnings
-              ? "Python finished with warnings."
-              : "Python finished."
+              ? `${languageLabel} finished with warnings.`
+              : `${languageLabel} finished.`
         });
       } catch (error) {
         finishBlockOutput({
@@ -4115,7 +4191,19 @@ function Editor() {
     }
 
     if (commandName === "code") {
-      const codeTemplate = "```python\nprint(\"Hello from x2pad\")\n```\n";
+      const language = normalizeCodeLanguage(pendingCommand.argument);
+
+      if (!language) {
+        setShowCommands(false);
+        setCommandQuery("");
+        setCommandFeedback({
+          title: "Unsupported code language",
+          detail: "Use //code python, //code py, //code c++, or //code cpp."
+        });
+        return true;
+      }
+
+      const codeTemplate = getCodeTemplate(language);
       const commandLine = view.state.doc.lineAt(pendingCommand.from);
       const textBeforeCommand = view.state.doc.sliceString(
         commandLine.from,
@@ -4237,18 +4325,24 @@ function Editor() {
 
   const editorExtensions = useMemo(() => [
     markdown({
-      codeLanguages: (info) => ["python", "py"].includes(info.toLowerCase())
-        ? pythonLanguage
-        : null
+      codeLanguages: (info) => {
+        const language = normalizeCodeLanguage(info);
+        return language === "python"
+          ? pythonLanguage
+          : language === "cpp"
+            ? cppLanguage
+            : null;
+      }
     }),
     EditorView.lineWrapping,
     textStyleDecorations,
     commandLineDecorations,
     structuredTableDecorations(structuredTablesRef),
     protectStructuredTableAnchors,
+    structuredTableHistory,
     codeBoxDecorations,
     EditorView.inputHandler.of((view, _from, _to, text) => {
-      const block = getSelectedPythonCodeBlock(view);
+      const block = getSelectedCodeBlock(view);
 
       if (!block || !text) {
         return false;
@@ -4276,11 +4370,11 @@ function Editor() {
             return true;
           }
 
-          if (acceptAiSession(view) || enterSelectedPythonCodeBox(view)) {
+          if (acceptAiSession(view) || enterSelectedCodeBox(view)) {
             return true;
           }
 
-          if (getPythonSourceBlockAtSelection(view)) {
+          if (getCodeSourceBlockAtSelection(view)) {
             return false;
           }
 
@@ -4293,11 +4387,11 @@ function Editor() {
       },
       {
         key: "Ctrl-Enter",
-        run: runPythonBlockAtCursor
+        run: runCodeBlockAtCursor
       },
       {
         key: "Cmd-Enter",
-        run: runPythonBlockAtCursor
+        run: runCodeBlockAtCursor
       },
       {
         key: "ArrowDown",
@@ -4306,7 +4400,7 @@ function Editor() {
             (currentIndex + 1) % visibleCommands.length
           )), true)
           : moveAroundStructuredTable(view, "down") ||
-          moveInsidePythonCodeBoxOneLine(view, "down") ||
+          moveInsideCodeBoxOneLine(view, "down") ||
           moveOutsideCodeBoxOneLine(view, "down")
       },
       {
@@ -4316,20 +4410,20 @@ function Editor() {
             (currentIndex - 1 + visibleCommands.length) % visibleCommands.length
           )), true)
           : moveAroundStructuredTable(view, "up") ||
-          moveInsidePythonCodeBoxOneLine(view, "up") ||
+          moveInsideCodeBoxOneLine(view, "up") ||
           moveOutsideCodeBoxOneLine(view, "up")
       },
       {
         key: "ArrowLeft",
-        run: (view) => !!getSelectedPythonCodeBlock(view) || keepHorizontalArrowInsidePythonCodeBox(view, "left")
+        run: (view) => !!getSelectedCodeBlock(view) || keepHorizontalArrowInsideCodeBox(view, "left")
       },
       {
         key: "ArrowRight",
-        run: (view) => !!getSelectedPythonCodeBlock(view) || keepHorizontalArrowInsidePythonCodeBox(view, "right")
+        run: (view) => !!getSelectedCodeBlock(view) || keepHorizontalArrowInsideCodeBox(view, "right")
       },
       {
         key: "Tab",
-        run: (view) => aiSession?.status === "ready" ? cycleAiPlacement() : indentInsidePythonCodeBox(view)
+        run: (view) => aiSession?.status === "ready" ? cycleAiPlacement() : indentInsideCodeBox(view)
       },
       {
         key: "Shift-Tab",
@@ -4339,30 +4433,42 @@ function Editor() {
         key: "Escape",
         run: (view) => aiSession
           ? cancelAiSession()
-          : getSelectedPythonCodeBlock(view)
+          : getSelectedCodeBlock(view)
             ? true
-            : returnToSelectedPythonCodeBox(view)
+            : returnToSelectedCodeBox(view)
       },
       {
         key: "Backspace",
         run: (view) => deleteSelectedStructuredTable(view) ||
-          deleteSelectedPythonCodeBox(view) ||
-          keepDeletionInsideEmptyPythonCodeBox(view) ||
+          deleteSelectedCodeBox(view) ||
+          keepDeletionInsideEmptyCodeBox(view) ||
           deleteListMarkerAtCursor(view)
       },
       {
         key: "Delete",
         run: (view) => deleteSelectedStructuredTable(view) ||
-          deleteSelectedPythonCodeBox(view) ||
-          keepDeletionInsideEmptyPythonCodeBox(view)
+          deleteSelectedCodeBox(view) ||
+          keepDeletionInsideEmptyCodeBox(view)
       }
     ])),
     EditorView.updateListener.of((update) => {
+      const transactionEffects = update.transactions.flatMap((transaction) => transaction.effects);
+      const nextStructuredTables = applyStructuredTableHistoryEffects(
+        structuredTablesRef.current,
+        transactionEffects
+      );
+
+      if (nextStructuredTables !== structuredTablesRef.current) {
+        structuredTablesRef.current = nextStructuredTables;
+        setStructuredTables(nextStructuredTables);
+        setTableRenderRevision((revision) => revision + 1);
+      }
+
       if (!update.docChanged) {
         return;
       }
 
-      const previousCodeBlocks = getPythonCodeBlocks(update.startState.doc);
+      const previousCodeBlocks = getCodeBlocks(update.startState.doc);
       const changedBlockStarts = new Set<number>();
       update.changes.iterChanges((fromA, toA) => {
         for (const block of previousCodeBlocks) {
@@ -4375,7 +4481,7 @@ function Editor() {
         }
       });
       const nextCodeBlockStarts = new Set(
-        getPythonCodeBlocks(update.state.doc).map((block) => block.blockFrom)
+        getCodeBlocks(update.state.doc).map((block) => block.blockFrom)
       );
       setCodeRuns((currentRuns) => currentRuns
         .map((output) => {
@@ -4383,7 +4489,9 @@ function Editor() {
 
           if (changedBlockStarts.has(output.blockFrom)) {
             return {
-              ...idleCodeOutput(),
+              ...idleCodeOutput(
+                getCodeBlocks(update.state.doc).find((block) => block.blockFrom === blockFrom)?.language ?? "python"
+              ),
               blockFrom,
               runId: crypto.randomUUID(),
               message: "Source changed. Press Ctrl+Enter to run it again."
@@ -4490,7 +4598,7 @@ function Editor() {
     deleteSelectedStructuredTable,
     runAiCommandAtCursor,
     runCommandAtCursor,
-    runPythonBlockAtCursor,
+    runCodeBlockAtCursor,
     navigateStructuredTableCell,
     selectedCommandIndex,
     showCommands,
@@ -4503,7 +4611,7 @@ function Editor() {
 
     const state = viewUpdate.state;
     const cursor = state.selection.main.head;
-    const isInsideCommandExcludedBlock = !!getPythonCodeBlockAtPosition(state.doc, cursor) ||
+    const isInsideCommandExcludedBlock = !!getCodeBlockAtPosition(state.doc, cursor) ||
       !!getMarkdownTableAtPosition(state.doc, cursor);
 
     if (isInsideCommandExcludedBlock) {
@@ -5039,8 +5147,8 @@ function Editor() {
 
       const editorHasFocus = !!editorView && editorView.contentDOM.contains(document.activeElement);
       const cursorIsInCodeBox = !!editorView && (
-        !!getSelectedPythonCodeBlock(editorView) ||
-        !!getPythonCodeBlockAtPosition(
+        !!getSelectedCodeBlock(editorView) ||
+        !!getCodeBlockAtPosition(
           editorView.state.doc,
           editorView.state.selection.main.head
         )

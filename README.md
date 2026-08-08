@@ -72,11 +72,11 @@ Currently, we require users to input their Gemini API key into the app in order 
 The code box allows users to write and run code snippets directly inside their notes. This is especially useful for students, developers, and technical users who want to test ideas without leaving the editor. The goal is to make x2pad useful not only for writing, but also for lightweight experimentation.
 
 ### How It Works
-Users can type `//code` to insert a Python code box into the document. The code box provides Python syntax highlighting and keeps the source code as part of the note. Users can enter and leave the box using the keyboard, then press `Ctrl+Enter` to run the snippet.
+Users can type `//code` to insert a Python code box, preserving the original command behaviour. They can preselect a language with `//code python` or `//code c++`; the aliases `//code py` and `//code cpp` are also supported. Each code box displays its language, provides matching syntax highlighting, and keeps the source code as part of the note. Users can enter and leave the box using the keyboard, then press `Ctrl+Enter` to run the snippet.
 
-The output panel below the code box displays standard output, error output, and the result of the execution. The React frontend manages the editing experience and sends the Python source to the Tauri/Rust backend, which runs it using a locally installed Python interpreter.
+The output panel below the code box displays standard output, error output, and the result of compilation or execution. The React frontend manages the editing experience and sends the selected language and source code to the Tauri/Rust backend. Python uses a locally installed Python 3 interpreter. C++ is compiled as C++17 using an available `g++`, `clang++`, or Microsoft C++ Build Tools compiler before the resulting program is run.
 
-The current implementation supports Python. C++ and other languages may be added in future versions.
+The current implementation supports Python and C++. Unsupported language names produce a clear message without creating an incorrectly labelled code box.
 
 ## 5. Tables
 The table feature is designed to help users structure information quickly without relying on mouse-heavy table editing tools. This is useful for lecture notes, comparison charts, planning, and lightweight calculations. The goal is to make table editing feel natural inside a keyboard-first note-taking environment.
@@ -184,7 +184,7 @@ This screenshot shows a table rendered directly inside a note. The example conta
                 <li>//size</li>
                 <li>//color</li>
                 <li>//bulletlist, //numberlist</li>
-                <li>//code</li>
+                <li>//code, //code python, //code c++</li>
                 <li>//table</li>
                 <li>//date, //time</li>
                 <li>//wordcount</li>
@@ -295,7 +295,7 @@ The current `.x2` file includes:
 }
 ```
 
-This gives the app a working persistence layer for the current editor features. Python code boxes are preserved as readable fenced code blocks in `content`. Structured tables are represented by `[[x2-table:<id>]]` anchors in `content`, while their columns, rows, cell text, and cell formatting are stored in the `tables` field. Future `.x2` versions can add richer metadata while retaining version-aware loading.
+This gives the app a working persistence layer for the current editor features. Python and C++ code boxes are preserved as readable fenced code blocks in `content`. Structured tables are represented by `[[x2-table:<id>]]` anchors in `content`, while their columns, rows, cell text, and cell formatting are stored in the `tables` field. Future `.x2` versions can add richer metadata while retaining version-aware loading.
 
 # Architecture
 ![architecture](project-docs/architecture.jpg)
@@ -318,7 +318,7 @@ The backend handles:
 - Opening existing `.x2` files
 - Exporting notes to other formats such as PDF
 - Accessing the local file system
-- Running Python snippets using the interpreter installed on the user's device
+- Running Python snippets and compiling and running C++17 snippets using tools installed on the user's device
 - Handling backend operations that should not be done directly in the frontend
 
 ## 3. How Commands Flow Through the App
@@ -353,19 +353,19 @@ The frontend processes a table as follows:
 Unlike Python execution, table editing and calculations do not require the Rust backend because they modify frontend state. When a note is saved, the frontend sends the table data together with the title, document content, and text style ranges to the Rust backend for serialisation in the `.x2` file.
 
 ## 5. How Code Execution Works
-The code box demonstrates why x2pad separates editor behaviour from native desktop operations. CodeMirror and React provide the interactive editing experience, while Rust handles the operating-system process required to execute Python.
+The code box demonstrates why x2pad separates editor behaviour from native desktop operations. CodeMirror and React provide the interactive editing experience, while Rust handles the operating-system processes required to run Python or compile and run C++.
 
 The code execution flow works like this:
 
-1. The user types `//code`, and the frontend replaces the command with a fenced Python code block.
-2. CodeMirror detects the block and applies Python syntax highlighting and code-box decorations.
+1. The user types `//code`, `//code python`, or `//code c++`, and the frontend replaces the command with a fenced code block for the selected language.
+2. CodeMirror detects the block and applies Python or C++ syntax highlighting and code-box decorations.
 3. The user writes or edits the snippet and presses `Ctrl+Enter`.
-4. The frontend identifies the active code box, extracts only its Python source, and calls the Tauri command `run_python_snippet`.
-5. The Rust backend starts the locally installed Python interpreter and sends the source code through standard input.
+4. The frontend identifies the active code box, extracts its language and source, and calls the Tauri command `run_code_snippet`.
+5. For Python, the Rust backend starts a locally installed Python 3 interpreter and sends the source code through standard input. For C++, it writes the source to a temporary directory, compiles it as C++17, and runs the resulting executable.
 6. The backend captures standard output, error output, and the process exit code.
 7. The result is returned to the frontend and displayed in an output panel below the code box.
 
-The backend first attempts to use the Windows Python launcher through `py -3` and then falls back to the `python` command. To prevent a faulty or excessively verbose snippet from running without control, execution is stopped after five seconds and each output stream is limited to 256 KiB. Failures such as an empty code box, unavailable Python installation, runtime error, timeout, or truncated output are returned as controlled messages instead of crashing the editor.
+The backend first attempts to use the Windows Python launcher through `py -3` and then falls back to the `python` command. For C++, it tries `g++`, `clang++`, and then Microsoft `cl`. Compilation is limited to 15 seconds, execution is limited to five seconds, and each output stream is limited to 256 KiB. Temporary C++ source files and executables are removed after each run. Empty code boxes, missing interpreters or compilers, compilation failures, runtime errors, timeouts, and truncated output are returned as controlled messages instead of crashing the editor.
 
 This design keeps process execution outside the browser-based frontend while allowing the result to remain part of the user's writing workflow.
 
@@ -473,7 +473,7 @@ This split is important because x2pad is not just displaying plain text. It has 
 The Architecture, Command Registry, and `.x2` sections explain the implementation flows in detail. This section highlights the engineering principles demonstrated by those choices.
 
 ## 1. Separation and Project Structure
-The React/CodeMirror frontend handles editing and interaction, while the Rust/Tauri backend handles file operations, PDF generation, settings, and Python execution. The code is further separated into page components, reusable sidebar components, command definitions, and CSS files:
+The React/CodeMirror frontend handles editing and interaction, while the Rust/Tauri backend handles file operations, PDF generation, settings, and Python/C++ execution. The code is further separated into page components, reusable sidebar components, command definitions, and CSS files:
 
 - `src/pages/Editor.tsx`: main editor workflow and feature coordination
 - `src/pages/StartPage.tsx`: starting page
@@ -493,9 +493,9 @@ x2pad validates input at several boundaries:
 - `//size` accepts only finite values greater than zero.
 - `//color` accepts aliases listed in `TEXT_COLOR_OPTIONS`.
 - The `.x2` loader checks the extension, format identifier, and supported version range.
-- The Python runner rejects empty snippets, enforces a five-second timeout, limits each output stream to 256 KiB, and reports a missing interpreter.
+- The code runner rejects empty snippets, reports missing interpreters or compilers, limits compilation to 15 seconds and execution to five seconds, caps each output stream at 256 KiB, and removes temporary C++ build files.
 - Rust Tauri commands return `Result<..., String>` so file, export, settings, and execution failures can be shown in the interface.
-- File save, file load, PDF export, settings, and Python execution errors are returned to the frontend and displayed as visible status messages instead of crashing the editor.
+- File save, file load, PDF export, settings, and code execution errors are returned to the frontend and displayed as visible status messages instead of crashing the editor.
 - AI errors, missing Gemini API keys, and failed AI requests are handled with visible interface states so the user can cancel or continue writing safely.
 
 ## 4. Versioned Local-First Persistence
@@ -511,29 +511,40 @@ This keeps command detection, formatting, AI insertion, note selection, tables, 
 ## 6. User-Centred and Privacy-Conscious Design
 Formatting, saving, AI assistance, tables, and code execution share the same typed-command model, with the command menu supporting discoverability. Normal notes remain on the user's device; only use of the optional Gemini feature sends the prompt and document context to an external service.
 
-# Current Milestone Objectives
-For the current milestone, our main objective is to complete the core code-box and table features while preserving x2pad's keyboard-first workflow, and then begin the first round of user testing.
+# Previous Milestones
 
-The milestone objectives are:
+The project was developed incrementally across three milestones. Each milestone built on the editor foundation established in the previous submission.
 
-- Implement `//code` with Python execution and in-editor output
-- Implement `//table` with keyboard navigation, automatic row creation, and formulas
-- Ensure that code boxes and tables can be saved and reopened through the existing `.x2` format
-- Begin the first round of user testing for the new workflows
+## Milestone 1 — Editor Foundation (1 June 2026)
 
-# Current Milestone Progress
-The code-box, structured-table, version 2 `.x2` persistence, and first-round user-testing objectives are complete. Five participants tested the application using the user guide, and their feedback has started to inform design changes. The detailed findings are recorded in the User Testing section.
+In the first milestone, we created the initial usable version of x2pad using Tauri, React, TypeScript, and CodeMirror. We built the main desktop editor layout, including the title bar, toolbar, writing area, and status bar, and established the keyboard-first "CLI within a Doc" concept.
 
-# Next Milestone Objectives
-For the next milestone, our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
+We also created the central command registry and implemented the first text-formatting commands: `//title`, `//header`, `//body`, `//bold`, `//italic`, `//strike`, `//underline`, and `//default`. These commands demonstrated that users could control formatting without leaving the document or relying entirely on toolbar actions.
 
-The next milestone objectives are:
+## Milestone 2 — Commands, Persistence, and AI (29 June 2026)
+
+In the second milestone, we expanded the `//` registry into a more complete command workflow. The command menu could filter suggestions as the user typed, and we added commands for font size, colour, bullet and numbered lists, date, time, word count, saving, and PDF export. We also introduced the local `.x2` note format so documents could be saved and reopened.
+
+We developed the first usable version of the `\\` AI registry using the Gemini API. Users could enter a prompt from inside the editor and insert the generated response into their note while continuing to use their own Gemini API key. We also tested the command registry, `.x2` persistence, cross-feature behaviour, edge cases, stress cases, and the AI workflow.
+
+## Milestone 3 — Code Boxes, Tables, and User Testing (27 July 2026)
+
+In the third milestone, we added executable Python code boxes through `//code`. Code boxes support Python syntax highlighting, keyboard navigation, `Ctrl+Enter` execution, and an output panel for results and errors. Python source is sent to the Tauri/Rust backend and executed using a locally installed interpreter.
+
+We also implemented structured tables through `//table`, including keyboard-based cell navigation, automatic row and column creation, row and column deletion, and formulas such as `sum`, `avg`, `mean`, `min`, `max`, and `count`. Version 2 of the `.x2` format added structured-table persistence while retaining compatibility with earlier notes.
+
+Finally, five participants completed the first round of user testing. Their feedback led us to change the default table from 3×3 to 1×1 and highlighted the need for fuzzy command search to make longer commands easier to discover and enter.
+
+# Splashdown Objectives
+Finally, our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
+
+C++ execution and language preselection have now been completed. Users can create Python or C++ code boxes explicitly while the original `//code` command remains compatible with Python.
+
+The objectives are:
 
 - Improve structured-table accessibility, cell layout, and handling of larger tables
 - Add clearer visible controls for managing table rows and columns while preserving keyboard-first navigation and formulas
 - Implement fuzzy command search with Fuse.js so partial or imperfect command names can return useful suggestions
-- Add C++ execution to the code box
-- Allow users to select or identify the programming language used by each code box
 - Refine structured-table PDF export with better cell wrapping and page-break handling
 - Improve PDF export so that code boxes preserve code formatting and clearly display their output
 - Continue user testing and use the findings to refine table editing, code-box interaction, and export quality
@@ -561,8 +572,9 @@ The following commands provide reproducible checks for the frontend and Rust bac
 | Command | Purpose | Result |
 |---|---|---|
 | `npm run build` | Compiles TypeScript and creates the production Vite frontend build | Passed |
-| `npm run test:stress` | Checks command actions, table formulas, code-block parsing, AI-response parsing, style ranges, paths, and frontend utility logic | 2,135 assertions passed |
-| `cd src-tauri && cargo test` | Checks `.x2` validation and compatibility, structured-table persistence, folder loading, PDF helpers and export, and Python execution limits | 10 tests passed |
+| `npm run test:all` | Runs the production build, frontend stress suite, Rust formatting check, and Rust tests | Passed |
+| `npm run test:stress` | Checks command actions and arguments, table formulas, table/code-box delete-undo-redo behaviour, Python/C++ code-block parsing, AI-response parsing, style ranges, paths, and frontend utility logic | 2,158 assertions passed |
+| `cd src-tauri && cargo test` | Checks `.x2` validation and compatibility, structured-table persistence, folder loading, PDF helpers and export, Python execution limits, and C++ compilation and error reporting | 12 tests passed |
 
 The stress-test script performs deterministic logic checks; it does not simulate real typing speed or measure visual interface responsiveness.
 

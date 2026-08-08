@@ -5,7 +5,8 @@ import { createRequire } from "node:module";
 import ts from "typescript";
 
 const require = createRequire(import.meta.url);
-const { Text } = require("@codemirror/state");
+const { EditorState, StateEffect, Text } = require("@codemirror/state");
+const { history, invertedEffects, redo, undo } = require("@codemirror/commands");
 let checks = 0;
 
 function check(actual, expected, message) {
@@ -65,8 +66,15 @@ function loadEditorSupport() {
     "getAiMarkdownHeadingStyle",
     "getAiMarkdownHeading",
     "parseAiFormattedText",
-    "getPythonCodeBlocks",
-    "getPythonCodeBlockAtPosition",
+    "normalizeCodeLanguage",
+    "getCodeTemplate",
+    "getCodeBlocks",
+    "getCodeBlockAtPosition",
+    "getCommandAtCursor",
+    "removeStructuredTableFromHistory",
+    "restoreStructuredTableFromHistory",
+    "structuredTableHistory",
+    "applyStructuredTableHistoryEffects",
     "isPotentialTableLine",
     "isMarkdownTableSeparator",
     "parseTableLineCells",
@@ -78,6 +86,7 @@ function loadEditorSupport() {
     "parseTableFormula",
     "parseStructuredTableFormula",
     "normalizeStructuredTable",
+    "normalizeStructuredTables",
     "evaluateStructuredTableFormula",
     "evaluateTableFormula",
     "getSafeFileName",
@@ -132,7 +141,7 @@ function loadEditorSupport() {
       target: ts.ScriptTarget.ES2022
     }
   }).outputText;
-  const context = { Text, console };
+  const context = { StateEffect, Text, invertedEffects, console };
   vm.runInNewContext(compiled, context, { filename: "Editor.test-support.ts" });
   return context.__editorSupport;
 }
@@ -317,13 +326,114 @@ function testEditorLogic(editor) {
     "```PYTHON",
     "print('two')",
     "```",
+    "```cpp",
+    "#include <iostream>",
+    "```",
     "after"
   ]);
-  const blocks = editor.getPythonCodeBlocks(codeDoc);
-  check(blocks.length, 2);
-  check(blocks.map((block) => block.code), ["print('one')", "print('two')"]);
-  check(editor.getPythonCodeBlockAtPosition(codeDoc, blocks[0].from)?.code, "print('one')");
-  check(editor.getPythonCodeBlockAtPosition(Text.of(["```javascript", "1", "```"]), 5), null);
+  const blocks = editor.getCodeBlocks(codeDoc);
+  check(blocks.length, 3);
+  check(blocks.map((block) => block.language), ["python", "python", "cpp"]);
+  check(blocks.map((block) => block.code), ["print('one')", "print('two')", "#include <iostream>"]);
+  check(editor.getCodeBlockAtPosition(codeDoc, blocks[0].from)?.code, "print('one')");
+  check(editor.getCodeBlockAtPosition(Text.of(["```javascript", "1", "```"]), 5), null);
+  check(editor.normalizeCodeLanguage(undefined), "python");
+  check(editor.normalizeCodeLanguage("py"), "python");
+  check(editor.normalizeCodeLanguage("c++"), "cpp");
+  check(editor.normalizeCodeLanguage("cpp"), "cpp");
+  check(editor.normalizeCodeLanguage("javascript"), null);
+  check(editor.getCodeTemplate("python").startsWith("```python\n"), true);
+  check(editor.getCodeTemplate("cpp").startsWith("```cpp\n"), true);
+
+  const codeCommandDoc = Text.of(["//code c++"]);
+  const codeCommandView = {
+    state: {
+      doc: codeCommandDoc,
+      selection: { main: { empty: true, head: codeCommandDoc.length } }
+    }
+  };
+  check(editor.getCommandAtCursor(codeCommandView), {
+    name: "code",
+    argument: "c++",
+    from: 0,
+    to: codeCommandDoc.length
+  });
+
+  const deletedCodeBoxText = editor.getCodeTemplate("cpp");
+  let codeHistoryState = EditorState.create({
+    doc: deletedCodeBoxText,
+    extensions: [history()]
+  });
+  codeHistoryState = codeHistoryState.update({
+    changes: { from: 0, to: codeHistoryState.doc.length, insert: "" }
+  }).state;
+  let codeUndoTransaction = null;
+  const codeHistoryView = {
+    get state() { return codeHistoryState; },
+    dispatch(transaction) {
+      codeUndoTransaction = transaction;
+      codeHistoryState = transaction.state;
+    }
+  };
+  check(undo(codeHistoryView), true);
+  check(codeHistoryState.doc.toString(), deletedCodeBoxText);
+  check(editor.getCodeBlocks(codeHistoryState.doc).map((block) => block.language), ["cpp"]);
+  check(codeUndoTransaction.docChanged, true);
+
+  const undoTable = {
+    id: "undo-table",
+    columns: ["Column 1"],
+    rows: [[{ text: "restored cell", styles: [] }]]
+  };
+  const tableAnchorText = `[[x2-table:${undoTable.id}]]\n`;
+  let tableHistoryState = EditorState.create({
+    doc: tableAnchorText,
+    extensions: [history(), editor.structuredTableHistory]
+  });
+  let tableCollection = [undoTable];
+  const tableDeleteTransaction = tableHistoryState.update({
+    changes: { from: 0, to: tableHistoryState.doc.length, insert: "" },
+    effects: editor.removeStructuredTableFromHistory.of(undoTable)
+  });
+  tableHistoryState = tableDeleteTransaction.state;
+  tableCollection = editor.applyStructuredTableHistoryEffects(
+    tableCollection,
+    tableDeleteTransaction.effects
+  );
+  check(tableHistoryState.doc.toString(), "");
+  check(tableCollection, []);
+
+  let tableHistoryTransaction = null;
+  const tableHistoryView = {
+    get state() { return tableHistoryState; },
+    dispatch(transaction) {
+      tableHistoryTransaction = transaction;
+      tableHistoryState = transaction.state;
+    }
+  };
+  check(undo(tableHistoryView), true);
+  tableCollection = editor.applyStructuredTableHistoryEffects(
+    tableCollection,
+    tableHistoryTransaction.effects
+  );
+  check(tableHistoryState.doc.toString(), tableAnchorText);
+  check(tableCollection, [undoTable]);
+  check(
+    tableHistoryTransaction.effects.some((effect) => effect.is(editor.restoreStructuredTableFromHistory)),
+    true
+  );
+
+  check(redo(tableHistoryView), true);
+  tableCollection = editor.applyStructuredTableHistoryEffects(
+    tableCollection,
+    tableHistoryTransaction.effects
+  );
+  check(tableHistoryState.doc.toString(), "");
+  check(tableCollection, []);
+  check(
+    tableHistoryTransaction.effects.some((effect) => effect.is(editor.removeStructuredTableFromHistory)),
+    true
+  );
 
   const parsedMarkdown = editor.parseAiFormattedText(
     "# Heading\nPlain **bold** and *italic*, escaped \\*literal\\*, __both__."

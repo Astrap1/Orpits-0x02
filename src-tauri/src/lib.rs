@@ -3,12 +3,13 @@ use printpdf::{
     PdfLayerReference, Point, Rgb,
 };
 use serde::{Deserialize, Serialize};
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 const X2_FORMAT: &str = "x2pad.note";
@@ -24,7 +25,8 @@ const PDF_DEFAULT_TEXT_COLOR: &str = "Black";
 const PDF_POINT_TO_MM: f32 = 0.352_778;
 const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
 const NOTE_FOLDER_SETTINGS_FILE: &str = "note-folder-settings.json";
-const PYTHON_SNIPPET_TIMEOUT_SECONDS: u64 = 5;
+const CODE_COMPILE_TIMEOUT_SECONDS: u64 = 15;
+const CODE_RUN_TIMEOUT_SECONDS: u64 = 5;
 const CODE_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize)]
@@ -145,12 +147,20 @@ struct LoadedX2Folder {
     active_path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CodeRunPhase {
+    Compile,
+    Run,
+}
+
+#[derive(Debug, Serialize)]
 struct CodeRunResult {
     stdout: String,
     stderr: String,
     #[serde(rename = "exitCode")]
     exit_code: Option<i32>,
+    phase: CodeRunPhase,
 }
 
 #[derive(Clone)]
@@ -309,6 +319,16 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn run_code_snippet(language: String, code: String) -> Result<CodeRunResult, String> {
+    match language.trim().to_lowercase().as_str() {
+        "python" | "py" => run_python_snippet(code),
+        "cpp" | "c++" => run_cpp_snippet(code),
+        _ => Err(format!(
+            "Unsupported code language '{language}'. Use Python or C++."
+        )),
+    }
+}
+
 fn run_python_snippet(code: String) -> Result<CodeRunResult, String> {
     if code.trim().is_empty() {
         return Err("Python code block is empty.".to_string());
@@ -356,29 +376,154 @@ fn run_python_with_command(
     args: &[&str],
     code: &str,
 ) -> Result<CodeRunResult, String> {
+    let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+    run_code_process(
+        OsStr::new(program),
+        &args,
+        Some(code.as_bytes()),
+        "Python snippet",
+        CodeRunPhase::Run,
+        CODE_RUN_TIMEOUT_SECONDS,
+    )
+}
+
+fn run_cpp_snippet(code: String) -> Result<CodeRunResult, String> {
+    if code.trim().is_empty() {
+        return Err("C++ code block is empty.".to_string());
+    }
+
+    let unique_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Could not create a C++ build identifier: {error}"))?
+        .as_nanos();
+    let build_directory =
+        std::env::temp_dir().join(format!("x2pad-cpp-{}-{unique_id}", std::process::id()));
+    std::fs::create_dir(&build_directory)
+        .map_err(|error| format!("Could not create the temporary C++ build directory: {error}"))?;
+
+    let result = run_cpp_in_directory(&build_directory, &code);
+    if let Err(error) = std::fs::remove_dir_all(&build_directory) {
+        if result.is_ok() {
+            return Err(format!(
+                "C++ finished, but its temporary build directory could not be removed: {error}"
+            ));
+        }
+    }
+    result
+}
+
+fn run_cpp_in_directory(build_directory: &Path, code: &str) -> Result<CodeRunResult, String> {
+    let source_path = build_directory.join("main.cpp");
+    #[cfg(target_os = "windows")]
+    let executable_path = build_directory.join("x2pad-snippet.exe");
+    #[cfg(not(target_os = "windows"))]
+    let executable_path = build_directory.join("x2pad-snippet");
+
+    std::fs::write(&source_path, code)
+        .map_err(|error| format!("Could not write the temporary C++ source file: {error}"))?;
+
+    let mut compiler_failures = Vec::new();
+    for compiler in ["g++", "clang++"] {
+        let args = vec![
+            source_path.as_os_str().to_owned(),
+            OsString::from("-std=c++17"),
+            OsString::from("-O0"),
+            OsString::from("-o"),
+            executable_path.as_os_str().to_owned(),
+        ];
+
+        match run_code_process(
+            OsStr::new(compiler),
+            &args,
+            None,
+            &format!("C++ compilation with {compiler}"),
+            CodeRunPhase::Compile,
+            CODE_COMPILE_TIMEOUT_SECONDS,
+        ) {
+            Ok(result) if result.exit_code == Some(0) => return run_compiled_cpp(&executable_path),
+            Ok(result) => return Ok(result),
+            Err(error) => compiler_failures.push(error),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let object_path = build_directory.join("x2pad-snippet.obj");
+        let args = vec![
+            OsString::from("/nologo"),
+            OsString::from("/EHsc"),
+            OsString::from("/std:c++17"),
+            source_path.as_os_str().to_owned(),
+            OsString::from(format!("/Fe:{}", executable_path.display())),
+            OsString::from(format!("/Fo:{}", object_path.display())),
+        ];
+
+        match run_code_process(
+            OsStr::new("cl"),
+            &args,
+            None,
+            "C++ compilation with cl",
+            CodeRunPhase::Compile,
+            CODE_COMPILE_TIMEOUT_SECONDS,
+        ) {
+            Ok(result) if result.exit_code == Some(0) => return run_compiled_cpp(&executable_path),
+            Ok(result) => return Ok(result),
+            Err(error) => compiler_failures.push(error),
+        }
+    }
+
+    Err(format!(
+        "Could not find a working C++ compiler. Install g++, clang++, or Microsoft C++ Build Tools. {}",
+        compiler_failures.join(" ")
+    ))
+}
+
+fn run_compiled_cpp(executable_path: &Path) -> Result<CodeRunResult, String> {
+    run_code_process(
+        executable_path.as_os_str(),
+        &[],
+        None,
+        "C++ program",
+        CodeRunPhase::Run,
+        CODE_RUN_TIMEOUT_SECONDS,
+    )
+}
+
+fn run_code_process(
+    program: &OsStr,
+    args: &[OsString],
+    input: Option<&[u8]>,
+    process_label: &str,
+    phase: CodeRunPhase,
+    timeout_seconds: u64,
+) -> Result<CodeRunResult, String> {
     let mut child = Command::new(program)
         .args(args)
-        .stdin(Stdio::piped())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("Could not start {program}: {error}"))?;
+        .map_err(|error| format!("Could not start {process_label}: {error}"))?;
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Could not capture Python output.".to_string())?;
+        .ok_or_else(|| format!("Could not capture {process_label} output."))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "Could not capture Python errors.".to_string())?;
+        .ok_or_else(|| format!("Could not capture {process_label} errors."))?;
     let stdout_reader = thread::spawn(move || read_code_stream(stdout));
     let stderr_reader = thread::spawn(move || read_code_stream(stderr));
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
         stdin
-            .write_all(code.as_bytes())
-            .map_err(|error| format!("Could not send code to Python: {error}"))?;
+            .write_all(input)
+            .map_err(|error| format!("Could not send input to {process_label}: {error}"))?;
     }
 
     let started_at = Instant::now();
@@ -387,19 +532,19 @@ fn run_python_with_command(
     let status = loop {
         if let Some(_status) = child
             .try_wait()
-            .map_err(|error| format!("Could not check Python process: {error}"))?
+            .map_err(|error| format!("Could not check {process_label}: {error}"))?
         {
             break child
                 .wait()
-                .map_err(|error| format!("Could not finish Python process: {error}"))?;
+                .map_err(|error| format!("Could not finish {process_label}: {error}"))?;
         }
 
-        if started_at.elapsed() >= Duration::from_secs(PYTHON_SNIPPET_TIMEOUT_SECONDS) {
+        if started_at.elapsed() >= Duration::from_secs(timeout_seconds) {
             timed_out = true;
             let _ = child.kill();
             break child
                 .wait()
-                .map_err(|error| format!("Could not stop Python process: {error}"))?;
+                .map_err(|error| format!("Could not stop {process_label}: {error}"))?;
         }
 
         thread::sleep(Duration::from_millis(25));
@@ -407,15 +552,18 @@ fn run_python_with_command(
 
     let (stdout_bytes, stdout_truncated) = stdout_reader
         .join()
-        .map_err(|_| "Could not finish reading Python output.".to_string())??;
+        .map_err(|_| format!("Could not finish reading {process_label} output."))??;
     let (stderr_bytes, stderr_truncated) = stderr_reader
         .join()
-        .map_err(|_| "Could not finish reading Python errors.".to_string())??;
+        .map_err(|_| format!("Could not finish reading {process_label} errors."))??;
     let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
     let mut stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
 
     if timed_out {
-        append_code_runner_message(&mut stderr, "Python snippet timed out after 5 seconds.");
+        append_code_runner_message(
+            &mut stderr,
+            &format!("{process_label} timed out after {timeout_seconds} seconds."),
+        );
     }
 
     if stdout_truncated || stderr_truncated {
@@ -429,6 +577,7 @@ fn run_python_with_command(
         stdout,
         stderr,
         exit_code: if timed_out { None } else { status.code() },
+        phase,
     })
 }
 
@@ -464,8 +613,11 @@ fn append_code_runner_message(output: &mut String, message: &str) {
 
 #[cfg(test)]
 mod code_runner_tests {
-    use super::{read_code_stream, CODE_OUTPUT_LIMIT_BYTES};
+    use super::{
+        read_code_stream, run_code_snippet, run_cpp_snippet, CodeRunPhase, CODE_OUTPUT_LIMIT_BYTES,
+    };
     use std::io::Cursor;
+    use std::process::Command;
 
     #[test]
     fn code_stream_keeps_normal_output() {
@@ -482,6 +634,32 @@ mod code_runner_tests {
 
         assert_eq!(captured.len(), CODE_OUTPUT_LIMIT_BYTES);
         assert!(truncated);
+    }
+
+    #[test]
+    fn code_runner_rejects_unsupported_languages() {
+        let error = run_code_snippet("javascript".to_string(), "1 + 1".to_string()).unwrap_err();
+        assert!(error.contains("Unsupported code language"));
+    }
+
+    #[test]
+    fn cpp_runner_compiles_code_and_reports_compile_errors_when_available() {
+        if Command::new("g++").arg("--version").output().is_err() {
+            return;
+        }
+
+        let success = run_cpp_snippet(
+            "#include <iostream>\nint main() { std::cout << \"hello\"; }".to_string(),
+        )
+        .unwrap();
+        assert_eq!(success.exit_code, Some(0));
+        assert_eq!(success.stdout, "hello");
+        assert_eq!(success.phase, CodeRunPhase::Run);
+
+        let failure = run_cpp_snippet("int main( {".to_string()).unwrap();
+        assert_ne!(failure.exit_code, Some(0));
+        assert_eq!(failure.phase, CodeRunPhase::Compile);
+        assert!(!failure.stderr.trim().is_empty());
     }
 }
 
@@ -1594,7 +1772,7 @@ pub fn run() {
             load_startup_x2_folder,
             get_default_note_folder,
             export_note_pdf,
-            run_python_snippet,
+            run_code_snippet,
             has_gemini_api_key,
             get_gemini_api_key,
             save_gemini_api_key

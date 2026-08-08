@@ -201,7 +201,7 @@ export const CommandRegistry: Command[] = [
   },
   {
     name: "code",
-    description: "Insert a Python code box",
+    description: "Insert a Python or C++ code box",
     action: handledByEditor
   },
   {

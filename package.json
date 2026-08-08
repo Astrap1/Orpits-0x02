@@ -7,11 +7,13 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test:stress": "node scripts/stress-test.mjs",
+    "test:all": "npm run build && npm run test:stress && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo test --manifest-path src-tauri/Cargo.toml",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.2",
+    "@codemirror/lang-cpp": "^6.0.3",
     "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/lang-python": "^6.2.1",
     "@tauri-apps/api": "^2.10.1",
