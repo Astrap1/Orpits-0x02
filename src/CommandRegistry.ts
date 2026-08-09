@@ -205,6 +205,16 @@ export const CommandRegistry: Command[] = [
     action: handledByEditor
   },
   {
+    name: "code py",
+    description: "Insert a Python code box",
+    action: handledByEditor
+  },
+  {
+    name: "code c++",
+    description: "Insert a C++ code box",
+    action: handledByEditor
+  },
+  {
     name: "table",
     description: "Insert a keyboard table",
     action: handledByEditor

@@ -4133,11 +4133,15 @@ function Editor() {
       return false;
     }
 
-    if (pendingCommand.argument && !COMMANDS_WITH_ARGUMENTS.has(command.name.toLowerCase())) {
+    const selectedCommandName = command.name.toLowerCase();
+    const codeAliasMatch = selectedCommandName.match(/^code\s+(.+)$/);
+    const commandName = codeAliasMatch ? "code" : selectedCommandName;
+    const commandArgument = pendingCommand.argument ?? codeAliasMatch?.[1];
+
+    if (pendingCommand.argument && !COMMANDS_WITH_ARGUMENTS.has(commandName)) {
       return false;
     }
 
-    const commandName = command.name.toLowerCase();
     const documentText = (
       view.state.doc.sliceString(0, pendingCommand.from) +
       view.state.doc.sliceString(pendingCommand.to)
@@ -4191,7 +4195,7 @@ function Editor() {
     }
 
     if (commandName === "code") {
-      const language = normalizeCodeLanguage(pendingCommand.argument);
+      const language = normalizeCodeLanguage(commandArgument);
 
       if (!language) {
         setShowCommands(false);
@@ -4277,7 +4281,7 @@ function Editor() {
         setStrike,
         setUnderline
       },
-      pendingCommand.argument
+      commandArgument
     );
 
     if (!handled) {

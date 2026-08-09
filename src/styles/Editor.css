@@ -405,20 +405,23 @@ input {
 }
 
 .editor-stage {
+  --editor-inline-padding: clamp(24px, 5vw, 72px);
   position: relative;
   display: flex;
   min-height: 0;
   flex: 1;
   justify-content: flex-start;
   overflow: hidden;
-  padding: 0 clamp(24px, 5vw, 72px);
+  padding: 0;
 }
 
 .editor-stage > .cm-theme {
-  width: min(100%, 820px);
+  width: 100%;
+  min-width: 0;
 }
 
 .editor-stage .cm-editor {
+  width: 100%;
   height: 100% !important;
   background: transparent;
 }
@@ -433,8 +436,13 @@ input {
 }
 
 .editor-stage .cm-content {
+  width: min(820px, calc(100% - var(--editor-inline-padding) - var(--editor-inline-padding)));
+  min-width: 0;
+  margin-left: var(--editor-inline-padding);
   color: #ffffff !important;
   overflow-wrap: anywhere;
+  padding-right: 0 !important;
+  padding-left: 0 !important;
 }
 
 .editor-stage .cm-line {
@@ -469,6 +477,7 @@ input {
 
 .logo-mode {
   align-items: center;
+  justify-content: center;
 }
 
 .logo-empty-state {
@@ -1245,7 +1254,7 @@ input {
   }
 
   .editor-stage {
-    padding: 0 24px;
+    --editor-inline-padding: 24px;
   }
 }
 
@@ -1270,7 +1279,7 @@ input {
   }
 
   .editor-stage {
-    padding: 0 18px;
+    --editor-inline-padding: 18px;
   }
 
   .api-key-overlay {
