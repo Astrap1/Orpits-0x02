@@ -67,6 +67,8 @@ function loadEditorSupport() {
     "getAiMarkdownHeading",
     "parseAiFormattedText",
     "normalizeCodeLanguage",
+    "resolveCodeCommandLanguage",
+    "getCommandMenuQuery",
     "getCodeTemplate",
     "getCodeBlocks",
     "getCodeBlockAtPosition",
@@ -242,10 +244,13 @@ function testCommands(registry) {
     check(state.inserted[0], expected);
   }
 
-  for (const name of ["code", "table", "new", "open", "save", "export"]) {
+  for (const name of ["code", "table", "save", "export"]) {
     const { context } = makeCommandContext();
     check(commands.get(name).action(context), true);
   }
+
+  check(commands.has("new"), false);
+  check(commands.has("open"), false);
 
   for (const name of ["date", "time"]) {
     const { context, state } = makeCommandContext();
@@ -342,6 +347,14 @@ function testEditorLogic(editor) {
   check(editor.normalizeCodeLanguage("c++"), "cpp");
   check(editor.normalizeCodeLanguage("cpp"), "cpp");
   check(editor.normalizeCodeLanguage("javascript"), null);
+  check(editor.resolveCodeCommandLanguage("c", "code c++"), "cpp");
+  check(editor.resolveCodeCommandLanguage("p", "code py"), "python");
+  check(editor.resolveCodeCommandLanguage("cpp", "code py"), "cpp");
+  check(editor.resolveCodeCommandLanguage("c", "code"), null);
+  check(editor.getCommandMenuQuery("//code c"), "code c");
+  check(editor.getCommandMenuQuery("some text //code p"), "code p");
+  check(editor.getCommandMenuQuery("//code "), "code");
+  check(editor.getCommandMenuQuery("ordinary text"), null);
   check(editor.getCodeTemplate("python").startsWith("```python\n"), true);
   check(editor.getCodeTemplate("cpp").startsWith("```cpp\n"), true);
 
@@ -357,6 +370,20 @@ function testEditorLogic(editor) {
     argument: "c++",
     from: 0,
     to: codeCommandDoc.length
+  });
+
+  const cppAliasCommandDoc = Text.of(["//code cpp"]);
+  const cppAliasCommandView = {
+    state: {
+      doc: cppAliasCommandDoc,
+      selection: { main: { empty: true, head: cppAliasCommandDoc.length } }
+    }
+  };
+  check(editor.getCommandAtCursor(cppAliasCommandView), {
+    name: "code",
+    argument: "cpp",
+    from: 0,
+    to: cppAliasCommandDoc.length
   });
 
   const deletedCodeBoxText = editor.getCodeTemplate("cpp");

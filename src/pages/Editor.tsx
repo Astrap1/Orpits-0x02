@@ -1912,6 +1912,26 @@ function normalizeCodeLanguage(language?: string): CodeLanguage | null {
   return null;
 }
 
+function resolveCodeCommandLanguage(argument?: string, selectedCommandName?: string) {
+  const selectedAlias = selectedCommandName
+    ?.trim()
+    .toLowerCase()
+    .match(/^code\s+(.+)$/)?.[1];
+
+  if (!argument) {
+    return normalizeCodeLanguage(selectedAlias);
+  }
+
+  return normalizeCodeLanguage(argument) ?? (
+    selectedAlias ? normalizeCodeLanguage(selectedAlias) : null
+  );
+}
+
+function getCommandMenuQuery(textBeforeCursor: string) {
+  const commandMatch = textBeforeCursor.match(/\/\/([a-z]*)(?:\s+[^/\s]*)?$/i);
+  return commandMatch ? commandMatch[0].slice(2).trim().toLowerCase() : null;
+}
+
 function getCodeLanguageLabel(language: CodeLanguage) {
   return language === "cpp" ? "C++" : "Python";
 }
@@ -3629,7 +3649,7 @@ function Editor() {
   }, [getCellStyleForCommand, moveStructuredTableCell, updateStructuredCell]);
 
   const runFileCommand = useCallback(async (
-    commandName: "save" | "new" | "open" | "export",
+    commandName: "save" | "new" | "export",
     documentText: string,
     title: string,
     currentPath: string | null,
@@ -3639,48 +3659,16 @@ function Editor() {
     const isTauri = "__TAURI_INTERNALS__" in window;
 
     if (!isTauri) {
-      setFileStatus("New, open, save, and export require the desktop app.");
+      setFileStatus("New, save, and export require the desktop app.");
       setFileStatusKind("error");
       return;
     }
 
     const isSaveCommand = commandName === "save";
     const isNewCommand = commandName === "new";
-    const isOpenCommand = commandName === "open";
     const extension = isSaveCommand ? "x2" : "pdf";
     let outputPath = currentPath && isSaveCommand ? currentPath : null;
     const defaultNoteFolder = await invoke<string>("get_default_note_folder").catch(() => "");
-
-    if (isOpenCommand) {
-      const selectedPath = await open({
-        multiple: false,
-        defaultPath: defaultNoteFolder || undefined,
-        filters: [
-          {
-            name: "x2 note",
-            extensions: ["x2"]
-          }
-        ]
-      });
-
-      if (!selectedPath || Array.isArray(selectedPath)) {
-        setFileStatus("Open cancelled.");
-        setFileStatusKind("idle");
-        return;
-      }
-
-      try {
-        setFileStatus("Opening .x2 file...");
-        setFileStatusKind("idle");
-        const folder = await invoke<LoadedX2Folder>("load_x2_folder", { path: selectedPath });
-        openLoadedX2Folder(folder);
-      } catch (error) {
-        setFileStatus(String(error));
-        setFileStatusKind("error");
-      }
-
-      return;
-    }
 
     if (isNewCommand) {
       const selectedPath = await save({
@@ -3751,7 +3739,10 @@ function Editor() {
       title,
       content: documentText,
       styles,
-      tables
+      tables,
+      codeOutputs: isSaveCommand
+        ? []
+        : codeRuns.map(({ runId: _runId, ...output }) => output)
     };
 
     try {
@@ -3797,7 +3788,7 @@ function Editor() {
       setFileStatus(String(error));
       setFileStatusKind("error");
     }
-  }, [openLoadedX2Folder]);
+  }, [codeRuns, openLoadedX2Folder]);
 
   const createNewNote = useCallback(() => {
     const currentStyles = styleRangesRef.current.map((range) => ({
@@ -4127,7 +4118,9 @@ function Editor() {
     const exactCommand = CommandRegistry.find(
       (registeredCommand) => registeredCommand.name.toLowerCase() === pendingCommand.name
     );
-    const command = exactCommand ?? suggestedCommand;
+    // A dropdown choice is more specific than the command text used to open
+    // the menu (for example, selecting `code c++` from a bare `//code`).
+    const command = suggestedCommand ?? exactCommand;
 
     if (!command) {
       return false;
@@ -4195,7 +4188,7 @@ function Editor() {
     }
 
     if (commandName === "code") {
-      const language = normalizeCodeLanguage(commandArgument);
+      const language = resolveCodeCommandLanguage(commandArgument, selectedCommandName);
 
       if (!language) {
         setShowCommands(false);
@@ -4244,7 +4237,7 @@ function Editor() {
       return true;
     }
 
-    if (commandName === "save" || commandName === "new" || commandName === "open" || commandName === "export") {
+    if (commandName === "save" || commandName === "export") {
       view.dispatch({
         changes: {
           from: pendingCommand.from,
@@ -4628,10 +4621,9 @@ function Editor() {
     const line = state.doc.lineAt(cursor);
     const cursorOffset = cursor - line.from;
     const textBeforeCursor = line.text.slice(0, cursorOffset);
-    const commandMatch = textBeforeCursor.match(/\/\/([a-z]*)(?:\s+[^/\s]*)?$/i);
+    const nextCommandQuery = getCommandMenuQuery(textBeforeCursor);
 
-    if (commandMatch) {
-      const nextCommandQuery = commandMatch[1].toLowerCase();
+    if (nextCommandQuery !== null) {
       const nextVisibleCommandCount = getCommandSuggestions(nextCommandQuery).length;
 
       setShowCommands(true);
@@ -5253,7 +5245,6 @@ function Editor() {
 
           <label
             className={`vault-search ${sidebarSelection === 0 ? "selected" : ""}`}
-            onMouseEnter={showSearchPane}
           >
             <span className="search-glyph" aria-hidden="true" />
             <input
@@ -5270,7 +5261,6 @@ function Editor() {
             <button
               type="button"
               className={`note-link new-note-link ${sidebarSelection === 1 ? "active" : ""}`}
-              onMouseEnter={() => setSidebarSelection(1)}
               onFocus={() => setSidebarSelection(1)}
               onClick={createNewNote}
             >
@@ -5295,10 +5285,6 @@ function Editor() {
                   className={`note-link ${isSelected || isActive ? "active" : ""}`}
                   key={note.path}
                   title={note.path}
-                  onMouseEnter={() => {
-                    setSidebarSelection(selectionIndex);
-                    activateOpenedNote(note.path);
-                  }}
                   onFocus={() => {
                     setSidebarSelection(selectionIndex);
                     activateOpenedNote(note.path);

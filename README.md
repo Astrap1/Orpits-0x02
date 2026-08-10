@@ -74,7 +74,7 @@ The code box allows users to write and run code snippets directly inside their n
 ### How It Works
 Users can type `//code` to insert a Python code box, preserving the original command behaviour. They can preselect a language with `//code python` or `//code c++`; the aliases `//code py` and `//code cpp` are also supported. Each code box displays its language, provides matching syntax highlighting, and keeps the source code as part of the note. Users can enter and leave the box using the keyboard, then press `Ctrl+Enter` to run the snippet.
 
-The output panel below the code box displays standard output, error output, and the result of compilation or execution. The React frontend manages the editing experience and sends the selected language and source code to the Tauri/Rust backend. Python uses a locally installed Python 3 interpreter. C++ is compiled as C++17 using an available `g++`, `clang++`, or Microsoft C++ Build Tools compiler before the resulting program is run.
+The output panel below the code box displays standard output, error output, and the result of compilation or execution. The React frontend manages the editing experience and sends the selected language and source code to the Tauri/Rust backend. Python uses a locally installed Python 3 interpreter. C++ is compiled as C++17 using an available `g++`, `clang++`, or Microsoft C++ Build Tools compiler before the resulting program is run. PDF export reproduces each code box as a dark language-labelled source panel with monospace code and an attached output panel. The output panel includes the current run message, exit status, standard output, and error output; an unrun box is exported in its idle state. Editor-only keyboard instructions such as `Ctrl+Enter` and `Esc` are omitted from the PDF.
 
 The current implementation supports Python and C++. Unsupported language names produce a clear message without creating an incorrectly labelled code box.
 
@@ -94,11 +94,11 @@ In the table layer, tapping `Shift` cycles the selection from the current cell, 
 
 Tables also support calculations over spreadsheet-style cell ranges. For example, entering `//sum(A1:A3)` inside a table cell and pressing `Enter` replaces the formula with the calculated result. The supported operations are `sum`, `avg`, `mean`, `min`, `max`, and `count`.
 
-## 6. Fuzzy Search (27 Jul - 31 Jul)
-This planned feature will improve the discoverability of commands. Since x2pad depends heavily on typed commands, users should not need to memorise every command exactly. Fuzzy search will allow users to type partial or imperfect command names and still find the command they want.
+## 6. Fuzzy Search
+Fuzzy search improves the discoverability of commands. Since x2pad depends heavily on typed commands, users do not need to memorise every command exactly. The command menu accepts partial or imperfect command names and still returns useful suggestions.
 
 ### How It Works
-When implemented, Fuse.js will compare the user's input against the list of available commands. Instead of only matching exact prefixes, it will be able to return close matches.
+The command menu prioritises exact prefix matches, then ordered-letter abbreviations, followed by close matches returned by Fuse.js. This keeps exact searches predictable while making incomplete or imperfect input more forgiving.
 
 Eg. typing `//blt` could suggest `//bulletlist`
 
@@ -106,7 +106,7 @@ Eg. typing `//wrd` could suggest `//wordcount`
 
 Eg. typing `//hdr` could suggest `//header`
 
-This will make the command system more forgiving and beginner-friendly.
+This makes the command system more forgiving and beginner-friendly.
 
 # Tech Stack
 
@@ -121,8 +121,8 @@ This will make the command system more forgiving and beginner-friendly.
 3. CodeMirror 6
 - Powers the main text editor. CodeMirror's modular state architecture provides the document tracking, decorations, language support, and keymaps needed to detect character sequences such as `//` or `\\` and render interactive editor features.
 
-4. Fuse.js (planned)
-- Planned for lightweight fuzzy search in the command menu. The current command menu filters commands as the user types, while Fuse.js is intended for the later fuzzy search feature so users can still find commands even when they type imperfect abbreviations.
+4. Fuse.js
+- Provides fuzzy matching in the command menu so users can find commands through partial names, ordered-letter abbreviations, and imperfect input.
 
 5. CSS
 - Defines the visual design and layout of the application, including the dark editor theme, title bar, toolbar, command menu, editor container, and status bar.
@@ -184,11 +184,10 @@ This screenshot shows a table rendered directly inside a note. The example conta
                 <li>//size</li>
                 <li>//color</li>
                 <li>//bulletlist, //numberlist</li>
-                <li>//code, //code python, //code c++</li>
+                <li>//code, //code python, //code py, //code c++, //code cpp</li>
                 <li>//table</li>
                 <li>//date, //time</li>
                 <li>//wordcount</li>
-                <li>//new, //open</li>
                 <li>//save, //export</li>
             </ol>
         </td>
@@ -411,19 +410,20 @@ x2pad can send the prompt together with the current note context to the Gemini A
 The current interface provides thinking, ready, and error states, and lets the user choose where a response is inserted. Future versions can add streamed responses and clearer privacy information about when note context is sent to an external AI service.
 
 ## 8. How PDF Export Works
-PDF export is handled through the Rust/Tauri backend because PDF generation is closer to a desktop file operation than a normal frontend rendering task. The frontend already knows the current note title, text content, style ranges, and structured tables, but the backend is better suited for creating and writing the final PDF file to the user's device.
+PDF export is handled through the Rust/Tauri backend because PDF generation is closer to a desktop file operation than a normal frontend rendering task. The frontend already knows the current note title, text content, style ranges, structured tables, and visible code-box output, but the backend is better suited for creating and writing the final PDF file to the user's device.
 
 The PDF export flow works like this:
 1. The user runs `//export`.
-2. The frontend recognises the export command and collects the note title, content, style ranges, and structured tables.
+2. The frontend recognises the export command and collects the note title, content, style ranges, structured tables, and current code-box execution results.
 3. The user chooses where to save the PDF file.
 4. The frontend sends the note data and output path to the Rust/Tauri backend.
 5. The backend creates a PDF document using `printpdf`.
-6. The backend converts normal note content into styled text segments and replaces recognised table anchors with formatted structured tables.
-7. The backend wraps long normal-text lines so they fit within the PDF page width.
-8. The backend writes styled text and table cells to the PDF, including font size, colour, bold, italic, underline, and strikethrough where supported.
-9. If the note exceeds one page, the backend creates additional pages.
-10. The PDF is written to the selected file path.
+6. The backend converts normal note content into styled text segments, replaces recognised table anchors with formatted structured tables, and replaces Python or C++ fences with visual code-box panels.
+7. Code-box panels preserve indentation and explicit lines, wrap long source and output lines, display success or error status, and continue onto additional pages when necessary.
+8. The backend wraps long normal-text lines and table-cell content so they fit within the available width.
+9. Table row heights expand to fit their wrapped content, and the backend writes styled text and table cells to the PDF, including font size, colour, bold, italic, underline, and strikethrough where supported.
+10. If the note, code box, or table exceeds one page, the backend creates additional pages. Table rows remain intact across page breaks, and the table header is repeated on each new page.
+11. The PDF is written to the selected file path.
 
 This flow shows why x2pad separates editor state from export logic. The editor stores the note in a format that is useful while writing, while the backend transforms that same data into a document format that is useful for sharing or submission.
 
@@ -538,15 +538,12 @@ Finally, five participants completed the first round of user testing. Their feed
 # Splashdown Objectives
 Finally, our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
 
-C++ execution and language preselection have now been completed. Users can create Python or C++ code boxes explicitly while the original `//code` command remains compatible with Python.
+C++ execution, language preselection, fuzzy command search, structured-table PDF wrapping, and visual code-box PDF export have now been completed. Users can create Python or C++ code boxes explicitly while the original `//code` command remains compatible with Python. The command menu now uses Fuse.js alongside prefix and ordered-letter matching so that partial or imperfect command names can return useful suggestions. Exported tables use dynamic row heights, preserve wrapped and explicit lines, keep rows intact across page breaks, and repeat their headers on new pages. Exported code boxes reproduce the editor's language header, dark source panel, monospace content, run status, and visible standard or error output.
 
 The objectives are:
 
 - Improve structured-table accessibility, cell layout, and handling of larger tables
 - Add clearer visible controls for managing table rows and columns while preserving keyboard-first navigation and formulas
-- Implement fuzzy command search with Fuse.js so partial or imperfect command names can return useful suggestions
-- Refine structured-table PDF export with better cell wrapping and page-break handling
-- Improve PDF export so that code boxes preserve code formatting and clearly display their output
 - Continue user testing and use the findings to refine table editing, code-box interaction, and export quality
 - Investigate a managed AI access system so that users do not need to obtain and configure their own Gemini API key
 - Design usage tracking, quotas, secure API-key handling, and cost controls for the managed AI system before making it available to users
@@ -567,14 +564,14 @@ The managed AI access system is an exploratory objective because it would requir
 
 ### Automated Verification
 
-The following commands provide reproducible checks for the frontend and Rust backend:
+The following results were verified on 9 August 2026:
 
 | Command | Purpose | Result |
 |---|---|---|
 | `npm run build` | Compiles TypeScript and creates the production Vite frontend build | Passed |
 | `npm run test:all` | Runs the production build, frontend stress suite, Rust formatting check, and Rust tests | Passed |
 | `npm run test:stress` | Checks command actions and arguments, table formulas, table/code-box delete-undo-redo behaviour, Python/C++ code-block parsing, AI-response parsing, style ranges, paths, and frontend utility logic | 2,158 assertions passed |
-| `cd src-tauri && cargo test` | Checks `.x2` validation and compatibility, structured-table persistence, folder loading, PDF helpers and export, Python execution limits, and C++ compilation and error reporting | 12 tests passed |
+| `cd src-tauri && cargo test` | Checks `.x2` validation and compatibility, structured-table persistence, folder loading, PDF helpers, text spacing, multi-line table and code-box export, Python execution limits, and C++ compilation and error reporting | 15 tests passed |
 
 The stress-test script performs deterministic logic checks; it does not simulate real typing speed or measure visual interface responsiveness.
 
@@ -613,7 +610,7 @@ The test notes included:
 
 After reopening each note, we compared its title, text, formatting, code blocks, and table contents with the state before saving. We also opened invalid or unsupported files to confirm that the application displayed an error instead of replacing the current note or crashing.
 
-PDF export was tested separately because it transforms editor data into a different document format. We checked that the selected title and text appeared in the exported file, long content continued onto additional pages, supported text formatting remained visible, and structured tables were rendered as tables rather than internal table anchors.
+PDF export was tested separately because it transforms editor data into a different document format. We checked that the selected title and text appeared in the exported file, long content continued onto additional pages, supported text formatting remained visible, and structured tables were rendered as tables rather than internal table anchors. We also rendered a combined PDF containing successful and idle Python/C++ code boxes, visible execution output, and a multi-page table to check code-panel spacing, colours, wrapping, and transitions visually.
 
 #### 3. Cross-Feature Workflows
 
@@ -661,7 +658,7 @@ Based on this feedback, we changed `//table` to create a 1×1 table. Users can t
 
 Some participants found longer commands inconvenient to type, particularly when they could not remember the exact command name. Commands such as `//bulletlist` and `//wordcount` are descriptive, but entering the full name can interrupt the typing flow that x2pad is intended to preserve.
 
-This feedback supports the planned fuzzy-search feature for the next milestone. Fuse.js will be used to match partial or imperfect input against the command registry. For example, a user who types `//blt` could still be shown `//bulletlist`, while `//wrd` could suggest `//wordcount`. This will reduce the amount of typing required and make longer commands easier to discover without replacing the existing command names.
+This feedback led to the implementation of fuzzy command search. The command menu now uses Fuse.js together with prefix and ordered-letter matching. For example, a user who types `//blt` can still be shown `//bulletlist`, while `//wrd` can suggest `//wordcount`. This reduces the amount of typing required and makes longer commands easier to discover without replacing the existing command names.
 
 ### Follow-up Areas
 

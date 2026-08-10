@@ -1,6 +1,7 @@
 use printpdf::{
+    path::{PaintMode, WindingOrder},
     BuiltinFont, Color, IndirectFontRef, Line, Mm, PdfDocument, PdfDocumentReference,
-    PdfLayerReference, Point, Rgb,
+    PdfLayerReference, Point, Polygon, Rgb,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
@@ -21,6 +22,15 @@ const PDF_TITLE_FONT_SIZE: f32 = 18.0;
 const PDF_BODY_FONT_SIZE: f32 = 11.0;
 const PDF_BODY_LINE_HEIGHT_MM: f32 = 6.0;
 const PDF_BODY_MAX_WIDTH_MM: f32 = PDF_PAGE_WIDTH_MM - (PDF_MARGIN_MM * 2.0);
+const PDF_TABLE_MIN_ROW_HEIGHT_MM: f32 = 9.0;
+const PDF_TABLE_CELL_PADDING_X_MM: f32 = 2.0;
+const PDF_TABLE_CELL_PADDING_Y_MM: f32 = 1.5;
+const PDF_CODE_HEADER_HEIGHT_MM: f32 = 9.0;
+const PDF_CODE_PADDING_X_MM: f32 = 4.0;
+const PDF_CODE_PADDING_Y_MM: f32 = 3.0;
+const PDF_CODE_FONT_SIZE: f32 = 9.0;
+const PDF_CODE_LINE_HEIGHT_MM: f32 = 4.8;
+const PDF_CODE_META_FONT_SIZE: f32 = 8.0;
 const PDF_DEFAULT_TEXT_COLOR: &str = "Black";
 const PDF_POINT_TO_MM: f32 = 0.352_778;
 const GEMINI_SETTINGS_FILE: &str = "gemini-settings.json";
@@ -37,6 +47,20 @@ struct NotePayload {
     styles: Vec<TextStyleRange>,
     #[serde(default)]
     tables: Vec<X2Table>,
+    #[serde(rename = "codeOutputs", default)]
+    code_outputs: Vec<PdfCodeOutput>,
+}
+
+#[derive(Clone, Deserialize)]
+struct PdfCodeOutput {
+    #[serde(rename = "blockFrom")]
+    block_from: usize,
+    status: String,
+    stdout: String,
+    stderr: String,
+    #[serde(rename = "exitCode")]
+    exit_code: Option<i32>,
+    message: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -174,6 +198,7 @@ struct PdfFonts {
     bold: IndirectFontRef,
     italic: IndirectFontRef,
     bold_italic: IndirectFontRef,
+    mono: IndirectFontRef,
 }
 
 #[tauri::command]
@@ -283,6 +308,9 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
         bold_italic: document
             .add_builtin_font(BuiltinFont::HelveticaBoldOblique)
             .map_err(|error| format!("Could not load PDF font: {error}"))?,
+        mono: document
+            .add_builtin_font(BuiltinFont::Courier)
+            .map_err(|error| format!("Could not load PDF font: {error}"))?,
     };
     let title_font = document
         .add_builtin_font(BuiltinFont::HelveticaBold)
@@ -308,6 +336,7 @@ fn export_note_pdf(path: String, note: NotePayload) -> Result<(), String> {
         &note.content,
         &note.styles,
         &note.tables,
+        &note.code_outputs,
         &fonts,
     );
 
@@ -912,34 +941,59 @@ fn write_pdf_note_body(
     content: &str,
     styles: &[TextStyleRange],
     tables: &[X2Table],
+    code_outputs: &[PdfCodeOutput],
     fonts: &PdfFonts,
 ) {
     let mut cursor = 0;
 
-    while let Some((from, to, table_id)) = find_next_table_anchor(content, cursor) {
+    loop {
+        let next_table = find_next_table_anchor(content, cursor);
+        let next_code = find_next_code_block(content, cursor);
+        let next_from = match (&next_table, &next_code) {
+            (Some((table_from, _, _)), Some(code)) => (*table_from).min(code.from),
+            (Some((table_from, _, _)), None) => *table_from,
+            (None, Some(code)) => code.from,
+            (None, None) => break,
+        };
+
         write_pdf_text_block(
             document,
             current_layer,
             cursor_y,
-            &content[cursor..from],
-            &styles_for_content_range(content, styles, cursor, from),
+            &content[cursor..next_from],
+            &styles_for_content_range(content, styles, cursor, next_from),
             fonts,
         );
 
-        if let Some(table) = tables.iter().find(|candidate| candidate.id == table_id) {
-            write_pdf_table(document, current_layer, cursor_y, table, fonts);
-        } else {
-            write_pdf_text_block(
-                document,
-                current_layer,
-                cursor_y,
-                &content[from..to],
-                &[],
-                fonts,
-            );
+        if let Some(code) = next_code.filter(|code| code.from == next_from) {
+            let block_from = content[..code.from]
+                .chars()
+                .map(char::len_utf16)
+                .sum::<usize>();
+            let output = code_outputs
+                .iter()
+                .find(|output| output.block_from == block_from);
+            write_pdf_code_box(document, current_layer, cursor_y, &code, output, fonts);
+            cursor = code.to;
+            continue;
         }
 
-        cursor = to;
+        if let Some((from, to, table_id)) = next_table {
+            if let Some(table) = tables.iter().find(|candidate| candidate.id == table_id) {
+                write_pdf_table(document, current_layer, cursor_y, table, fonts);
+            } else {
+                write_pdf_text_block(
+                    document,
+                    current_layer,
+                    cursor_y,
+                    &content[from..to],
+                    &[],
+                    fonts,
+                );
+            }
+
+            cursor = to;
+        }
     }
 
     write_pdf_text_block(
@@ -950,6 +1004,64 @@ fn write_pdf_note_body(
         &styles_for_content_range(content, styles, cursor, content.len()),
         fonts,
     );
+}
+
+struct PdfCodeBlock {
+    from: usize,
+    to: usize,
+    language: String,
+    code: String,
+}
+
+fn find_next_code_block(content: &str, start: usize) -> Option<PdfCodeBlock> {
+    let mut search_from = start;
+
+    while let Some(relative_from) = content[search_from..].find("```") {
+        let from = search_from + relative_from;
+        let opening_end = content[from..].find('\n').map(|offset| from + offset)?;
+        let language = match content[from + 3..opening_end]
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "python" | "py" => "Python",
+            "cpp" | "c++" => "C++",
+            _ => {
+                search_from = opening_end + 1;
+                continue;
+            }
+        };
+        let code_from = opening_end + 1;
+        let relative_closing = content[code_from..].find("\n```")?;
+        let closing_line_from = code_from + relative_closing + 1;
+        let closing_to = closing_line_from + 3;
+
+        if content
+            .as_bytes()
+            .get(closing_to)
+            .is_some_and(|character| *character != b'\n' && *character != b'\r')
+        {
+            search_from = closing_to;
+            continue;
+        }
+
+        let to = if content[closing_to..].starts_with("\r\n") {
+            closing_to + 2
+        } else if content[closing_to..].starts_with('\n') {
+            closing_to + 1
+        } else {
+            closing_to
+        };
+
+        return Some(PdfCodeBlock {
+            from,
+            to,
+            language: language.to_string(),
+            code: content[code_from..closing_line_from - 1].to_string(),
+        });
+    }
+
+    None
 }
 
 fn find_next_table_anchor(content: &str, start: usize) -> Option<(usize, usize, String)> {
@@ -1009,7 +1121,7 @@ fn write_pdf_text_block(
     styles: &[TextStyleRange],
     fonts: &PdfFonts,
 ) {
-    for styled_line in build_styled_pdf_lines(content, styles) {
+    for styled_line in build_pdf_text_block_lines(content, styles) {
         if styled_line.is_empty() {
             *cursor_y -= PDF_BODY_LINE_HEIGHT_MM;
             continue;
@@ -1023,6 +1135,381 @@ fn write_pdf_text_block(
     }
 }
 
+fn build_pdf_text_block_lines(
+    content: &str,
+    styles: &[TextStyleRange],
+) -> Vec<Vec<StyledTextSegment>> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = build_styled_pdf_lines(content, styles);
+    if content.ends_with('\n') && lines.last().is_some_and(Vec::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+struct PdfCodeDisplayLine {
+    text: String,
+    color: &'static str,
+    mono: bool,
+}
+
+fn write_pdf_code_box(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+    block: &PdfCodeBlock,
+    output: Option<&PdfCodeOutput>,
+    fonts: &PdfFonts,
+) {
+    let source_lines = wrap_pdf_mono_text(
+        &block.code,
+        PDF_BODY_MAX_WIDTH_MM - PDF_CODE_PADDING_X_MM * 2.0,
+        PDF_CODE_FONT_SIZE,
+    );
+    let output_lines = build_pdf_code_output_lines(output);
+    let complete_height = PDF_CODE_HEADER_HEIGHT_MM * 2.0
+        + PDF_CODE_PADDING_Y_MM * 4.0
+        + (source_lines.len() + output_lines.len()) as f32 * PDF_CODE_LINE_HEIGHT_MM;
+    let printable_height = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM * 2.0;
+
+    *cursor_y -= 3.0;
+    if complete_height <= printable_height {
+        ensure_pdf_space(document, current_layer, cursor_y, complete_height);
+    }
+
+    write_pdf_code_source(
+        document,
+        current_layer,
+        cursor_y,
+        &block.language,
+        &source_lines,
+        fonts,
+    );
+    write_pdf_code_output(
+        document,
+        current_layer,
+        cursor_y,
+        &block.language,
+        output,
+        &output_lines,
+        fonts,
+    );
+    *cursor_y -= 4.0;
+}
+
+fn write_pdf_code_source(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+    language: &str,
+    lines: &[String],
+    fonts: &PdfFonts,
+) {
+    let mut line_index = 0;
+    let lines = if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines.to_vec()
+    };
+
+    while line_index < lines.len() {
+        let fixed_height = PDF_CODE_HEADER_HEIGHT_MM + PDF_CODE_PADDING_Y_MM * 2.0;
+        if !has_pdf_space(*cursor_y, fixed_height + PDF_CODE_LINE_HEIGHT_MM) {
+            add_pdf_page(document, current_layer, cursor_y);
+        }
+
+        let available_lines = (((*cursor_y - PDF_MARGIN_MM - fixed_height)
+            / PDF_CODE_LINE_HEIGHT_MM)
+            .floor() as usize)
+            .max(1);
+        let end = (line_index + available_lines).min(lines.len());
+        let chunk = &lines[line_index..end];
+        let panel_height = fixed_height + chunk.len() as f32 * PDF_CODE_LINE_HEIGHT_MM;
+        draw_pdf_panel(
+            current_layer,
+            PDF_MARGIN_MM,
+            *cursor_y,
+            PDF_BODY_MAX_WIDTH_MM,
+            panel_height,
+            "#12141a",
+            "#343740",
+        );
+
+        let header = if line_index == 0 {
+            language.to_string()
+        } else {
+            format!("{language} - continued")
+        };
+        write_pdf_colored_text(
+            current_layer,
+            &header.to_uppercase(),
+            PDF_CODE_META_FONT_SIZE,
+            PDF_MARGIN_MM + PDF_CODE_PADDING_X_MM,
+            *cursor_y - 5.8,
+            "#dffbff",
+            &fonts.bold,
+        );
+        draw_pdf_horizontal_rule(
+            current_layer,
+            PDF_MARGIN_MM,
+            *cursor_y - PDF_CODE_HEADER_HEIGHT_MM,
+            PDF_BODY_MAX_WIDTH_MM,
+            "#343740",
+        );
+
+        let mut line_y = *cursor_y
+            - PDF_CODE_HEADER_HEIGHT_MM
+            - PDF_CODE_PADDING_Y_MM
+            - PDF_CODE_LINE_HEIGHT_MM * 0.72;
+        for line in chunk {
+            write_pdf_colored_text(
+                current_layer,
+                line,
+                PDF_CODE_FONT_SIZE,
+                PDF_MARGIN_MM + PDF_CODE_PADDING_X_MM,
+                line_y,
+                "#edfaff",
+                &fonts.mono,
+            );
+            line_y -= PDF_CODE_LINE_HEIGHT_MM;
+        }
+
+        *cursor_y -= panel_height;
+        line_index = end;
+        if line_index < lines.len() {
+            add_pdf_page(document, current_layer, cursor_y);
+        }
+    }
+}
+
+fn write_pdf_code_output(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+    language: &str,
+    output: Option<&PdfCodeOutput>,
+    lines: &[PdfCodeDisplayLine],
+    fonts: &PdfFonts,
+) {
+    let mut line_index = 0;
+    let status = code_output_status(output);
+    let status_color = match output.map(|output| output.status.as_str()) {
+        Some("success") => "#8ee6a8",
+        Some("error") => "#ff8f9b",
+        _ => "#777181",
+    };
+
+    while line_index < lines.len() {
+        let fixed_height = PDF_CODE_HEADER_HEIGHT_MM + PDF_CODE_PADDING_Y_MM * 2.0;
+        if !has_pdf_space(*cursor_y, fixed_height + PDF_CODE_LINE_HEIGHT_MM) {
+            add_pdf_page(document, current_layer, cursor_y);
+        }
+
+        let available_lines = (((*cursor_y - PDF_MARGIN_MM - fixed_height)
+            / PDF_CODE_LINE_HEIGHT_MM)
+            .floor() as usize)
+            .max(1);
+        let end = (line_index + available_lines).min(lines.len());
+        let chunk = &lines[line_index..end];
+        let panel_height = fixed_height + chunk.len() as f32 * PDF_CODE_LINE_HEIGHT_MM;
+        draw_pdf_panel(
+            current_layer,
+            PDF_MARGIN_MM,
+            *cursor_y,
+            PDF_BODY_MAX_WIDTH_MM,
+            panel_height,
+            "#0c0e12",
+            "#343740",
+        );
+
+        let header = if line_index == 0 {
+            format!("Output - {language}")
+        } else {
+            format!("Output - {language} - continued")
+        };
+        write_pdf_colored_text(
+            current_layer,
+            &header.to_uppercase(),
+            PDF_CODE_META_FONT_SIZE,
+            PDF_MARGIN_MM + PDF_CODE_PADDING_X_MM,
+            *cursor_y - 5.8,
+            "#f5efff",
+            &fonts.bold,
+        );
+        write_pdf_colored_text(
+            current_layer,
+            &status,
+            7.0,
+            PDF_MARGIN_MM + PDF_BODY_MAX_WIDTH_MM - 20.0,
+            *cursor_y - 5.8,
+            status_color,
+            &fonts.bold,
+        );
+        draw_pdf_horizontal_rule(
+            current_layer,
+            PDF_MARGIN_MM,
+            *cursor_y - PDF_CODE_HEADER_HEIGHT_MM,
+            PDF_BODY_MAX_WIDTH_MM,
+            "#343740",
+        );
+
+        let mut line_y = *cursor_y
+            - PDF_CODE_HEADER_HEIGHT_MM
+            - PDF_CODE_PADDING_Y_MM
+            - PDF_CODE_LINE_HEIGHT_MM * 0.72;
+        for line in chunk {
+            write_pdf_colored_text(
+                current_layer,
+                &line.text,
+                if line.mono { 8.5 } else { 8.0 },
+                PDF_MARGIN_MM + PDF_CODE_PADDING_X_MM,
+                line_y,
+                line.color,
+                if line.mono {
+                    &fonts.mono
+                } else {
+                    &fonts.regular
+                },
+            );
+            line_y -= PDF_CODE_LINE_HEIGHT_MM;
+        }
+
+        *cursor_y -= panel_height;
+        line_index = end;
+        if line_index < lines.len() {
+            add_pdf_page(document, current_layer, cursor_y);
+        }
+    }
+}
+
+fn build_pdf_code_output_lines(output: Option<&PdfCodeOutput>) -> Vec<PdfCodeDisplayLine> {
+    let message = output
+        .map(|output| output.message.as_str())
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Not run yet.".to_string());
+    let mut lines = wrap_pdf_mono_text(
+        &message,
+        PDF_BODY_MAX_WIDTH_MM - PDF_CODE_PADDING_X_MM * 2.0,
+        8.0,
+    )
+    .into_iter()
+    .map(|text| PdfCodeDisplayLine {
+        text,
+        color: "#8e8799",
+        mono: false,
+    })
+    .collect::<Vec<_>>();
+
+    if let Some(output) = output {
+        lines.extend(wrap_pdf_code_stream(&output.stdout, "#dffbff"));
+        lines.extend(wrap_pdf_code_stream(&output.stderr, "#ffb4bd"));
+    }
+
+    lines
+}
+
+fn wrap_pdf_code_stream(content: &str, color: &'static str) -> Vec<PdfCodeDisplayLine> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    wrap_pdf_mono_text(
+        content.trim_end_matches(['\r', '\n']),
+        PDF_BODY_MAX_WIDTH_MM - PDF_CODE_PADDING_X_MM * 2.0,
+        8.5,
+    )
+    .into_iter()
+    .map(|text| PdfCodeDisplayLine {
+        text,
+        color,
+        mono: true,
+    })
+    .collect()
+}
+
+fn code_output_status(output: Option<&PdfCodeOutput>) -> String {
+    match output {
+        Some(output) => output
+            .exit_code
+            .map(|exit_code| format!("exit {exit_code}"))
+            .unwrap_or_else(|| output.status.clone()),
+        None => "idle".to_string(),
+    }
+}
+
+fn wrap_pdf_mono_text(content: &str, max_width_mm: f32, font_size: f32) -> Vec<String> {
+    let character_width = font_size * PDF_POINT_TO_MM * 0.6;
+    let max_characters = (max_width_mm / character_width).floor().max(1.0) as usize;
+    let mut lines = Vec::new();
+
+    for logical_line in content.split('\n') {
+        let characters = logical_line.chars().collect::<Vec<_>>();
+        if characters.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        for chunk in characters.chunks(max_characters) {
+            lines.push(chunk.iter().collect());
+        }
+    }
+
+    lines
+}
+
+fn draw_pdf_panel(
+    layer: &PdfLayerReference,
+    x: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    fill: &str,
+    outline: &str,
+) {
+    layer.set_fill_color(pdf_color(fill));
+    layer.set_outline_color(pdf_color(outline));
+    layer.set_outline_thickness(0.45);
+    layer.add_polygon(Polygon {
+        rings: vec![vec![
+            (Point::new(Mm(x), Mm(top)), false),
+            (Point::new(Mm(x + width), Mm(top)), false),
+            (Point::new(Mm(x + width), Mm(top - height)), false),
+            (Point::new(Mm(x), Mm(top - height)), false),
+        ]],
+        mode: PaintMode::FillStroke,
+        winding_order: WindingOrder::NonZero,
+    });
+}
+
+fn draw_pdf_horizontal_rule(layer: &PdfLayerReference, x: f32, y: f32, width: f32, color: &str) {
+    layer.set_outline_color(pdf_color(color));
+    layer.set_outline_thickness(0.35);
+    layer.add_line(Line {
+        points: vec![
+            (Point::new(Mm(x), Mm(y)), false),
+            (Point::new(Mm(x + width), Mm(y)), false),
+        ],
+        is_closed: false,
+    });
+}
+
+fn write_pdf_colored_text(
+    layer: &PdfLayerReference,
+    text: &str,
+    font_size: f32,
+    x: f32,
+    y: f32,
+    color: &str,
+    font: &IndirectFontRef,
+) {
+    layer.set_fill_color(pdf_color(color));
+    layer.use_text(sanitize_pdf_text(text), font_size, Mm(x), Mm(y), font);
+}
+
 fn write_pdf_table(
     document: &PdfDocumentReference,
     current_layer: &mut PdfLayerReference,
@@ -1032,69 +1519,117 @@ fn write_pdf_table(
 ) {
     let column_count = table.columns.len().max(1);
     let column_width = PDF_BODY_MAX_WIDTH_MM / column_count as f32;
-    let row_height = 9.0;
-    let table_width = column_width * column_count as f32;
+    let header_cells = table
+        .columns
+        .iter()
+        .map(|column| X2TableCell {
+            text: column.clone(),
+            styles: vec![TextStyleRange {
+                from: 0,
+                to: column.chars().map(char::len_utf16).sum(),
+                style: TextStyle {
+                    is_bold: true,
+                    ..TextStyle::default()
+                },
+            }],
+            active_style: None,
+        })
+        .collect::<Vec<_>>();
+    let header_layout = layout_pdf_table_row(&header_cells, column_width, column_count);
+    let row_layouts = table
+        .rows
+        .iter()
+        .map(|row| layout_pdf_table_row(row, column_width, column_count))
+        .collect::<Vec<_>>();
 
     *cursor_y -= 2.0;
-    ensure_pdf_space(document, current_layer, cursor_y, row_height);
-    write_pdf_table_row(
+    let opening_height = header_layout.height
+        + row_layouts
+            .first()
+            .map(|layout| layout.height)
+            .unwrap_or(0.0);
+    ensure_pdf_space(document, current_layer, cursor_y, opening_height);
+    draw_pdf_table_row(
         current_layer,
-        PDF_MARGIN_MM,
         *cursor_y,
-        row_height,
-        table_width,
         column_width,
-        column_count,
-        &table
-            .columns
-            .iter()
-            .map(|column| X2TableCell {
-                text: column.clone(),
-                styles: vec![TextStyleRange {
-                    from: 0,
-                    to: column.chars().map(char::len_utf16).sum(),
-                    style: TextStyle {
-                        is_bold: true,
-                        ..TextStyle::default()
-                    },
-                }],
-                active_style: None,
-            })
-            .collect::<Vec<_>>(),
+        &header_layout,
         fonts,
     );
-    *cursor_y -= row_height;
+    *cursor_y -= header_layout.height;
 
-    for row in &table.rows {
-        ensure_pdf_space(document, current_layer, cursor_y, row_height);
-        write_pdf_table_row(
-            current_layer,
-            PDF_MARGIN_MM,
-            *cursor_y,
-            row_height,
-            table_width,
-            column_width,
-            column_count,
-            row,
-            fonts,
-        );
-        *cursor_y -= row_height;
+    for row_layout in row_layouts {
+        if !has_pdf_space(*cursor_y, row_layout.height) {
+            add_pdf_page(document, current_layer, cursor_y);
+            draw_pdf_table_row(
+                current_layer,
+                *cursor_y,
+                column_width,
+                &header_layout,
+                fonts,
+            );
+            *cursor_y -= header_layout.height;
+        }
+
+        draw_pdf_table_row(current_layer, *cursor_y, column_width, &row_layout, fonts);
+        *cursor_y -= row_layout.height;
     }
 
     *cursor_y -= 3.0;
 }
 
-fn write_pdf_table_row(
-    layer: &PdfLayerReference,
-    x: f32,
-    y: f32,
-    row_height: f32,
-    table_width: f32,
+struct PdfTableRowLayout {
+    cells: Vec<Vec<Vec<StyledTextSegment>>>,
+    height: f32,
+}
+
+fn layout_pdf_table_row(
+    cells: &[X2TableCell],
     column_width: f32,
     column_count: usize,
-    cells: &[X2TableCell],
+) -> PdfTableRowLayout {
+    let max_text_width = (column_width - PDF_TABLE_CELL_PADDING_X_MM * 2.0).max(1.0);
+    let cells = (0..column_count)
+        .map(|index| {
+            let cell = cells.get(index);
+            let logical_lines = cell
+                .map(|cell| build_styled_pdf_lines(&cell.text, &cell.styles))
+                .unwrap_or_else(|| vec![Vec::new()]);
+
+            logical_lines
+                .into_iter()
+                .flat_map(|line| wrap_styled_pdf_line(&line, max_text_width))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let content_height = cells
+        .iter()
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| styled_pdf_line_height(line))
+                .sum::<f32>()
+        })
+        .fold(PDF_BODY_LINE_HEIGHT_MM, f32::max);
+
+    PdfTableRowLayout {
+        cells,
+        height: (content_height + PDF_TABLE_CELL_PADDING_Y_MM * 2.0)
+            .max(PDF_TABLE_MIN_ROW_HEIGHT_MM),
+    }
+}
+
+fn draw_pdf_table_row(
+    layer: &PdfLayerReference,
+    y: f32,
+    column_width: f32,
+    layout: &PdfTableRowLayout,
     fonts: &PdfFonts,
 ) {
+    let x = PDF_MARGIN_MM;
+    let column_count = layout.cells.len();
+    let table_width = column_width * column_count as f32;
+
     layer.set_outline_color(Color::Rgb(Rgb::new(0.72, 0.74, 0.78, None)));
     layer.set_outline_thickness(0.45);
 
@@ -1103,13 +1638,13 @@ fn write_pdf_table_row(
         layer.add_line(Line {
             points: vec![
                 (Point::new(Mm(column_x), Mm(y)), false),
-                (Point::new(Mm(column_x), Mm(y - row_height)), false),
+                (Point::new(Mm(column_x), Mm(y - layout.height)), false),
             ],
             is_closed: false,
         });
     }
 
-    for row_y in [y, y - row_height] {
+    for row_y in [y, y - layout.height] {
         layer.add_line(Line {
             points: vec![
                 (Point::new(Mm(x), Mm(row_y)), false),
@@ -1119,22 +1654,31 @@ fn write_pdf_table_row(
         });
     }
 
-    for (index, cell) in cells.iter().enumerate() {
-        let cell_x = x + column_width * index as f32 + 2.0;
-        let max_text_width = (column_width - 4.0).max(8.0);
-        let line = wrap_styled_pdf_line(
-            &build_styled_pdf_lines(&cell.text, &cell.styles)
-                .into_iter()
-                .next()
-                .unwrap_or_default(),
-            max_text_width,
-        )
-        .into_iter()
-        .next()
-        .unwrap_or_default();
+    for (index, lines) in layout.cells.iter().enumerate() {
+        let cell_x = x + column_width * index as f32 + PDF_TABLE_CELL_PADDING_X_MM;
+        let mut line_top = y - PDF_TABLE_CELL_PADDING_Y_MM;
 
-        write_styled_pdf_line(layer, &line, cell_x, y - 5.8, fonts);
+        for line in lines {
+            let line_height = styled_pdf_line_height(line);
+            let baseline = line_top - line_height * 0.72;
+            write_styled_pdf_line(layer, line, cell_x, baseline, fonts);
+            line_top -= line_height;
+        }
     }
+}
+
+fn has_pdf_space(cursor_y: f32, needed_height: f32) -> bool {
+    cursor_y - needed_height >= PDF_MARGIN_MM
+}
+
+fn add_pdf_page(
+    document: &PdfDocumentReference,
+    current_layer: &mut PdfLayerReference,
+    cursor_y: &mut f32,
+) {
+    let (page, layer) = document.add_page(Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), "Layer");
+    *current_layer = document.get_page(page).get_layer(layer);
+    *cursor_y = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM;
 }
 
 fn ensure_pdf_space(
@@ -1143,13 +1687,11 @@ fn ensure_pdf_space(
     cursor_y: &mut f32,
     needed_height: f32,
 ) {
-    if *cursor_y - needed_height >= PDF_MARGIN_MM {
+    if has_pdf_space(*cursor_y, needed_height) {
         return;
     }
 
-    let (page, layer) = document.add_page(Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), "Layer");
-    *current_layer = document.get_page(page).get_layer(layer);
-    *cursor_y = PDF_PAGE_HEIGHT_MM - PDF_MARGIN_MM;
+    add_pdf_page(document, current_layer, cursor_y);
 }
 
 fn build_styled_pdf_lines(content: &str, styles: &[TextStyleRange]) -> Vec<Vec<StyledTextSegment>> {
@@ -1297,10 +1839,7 @@ fn write_styled_pdf_line(
     fonts: &PdfFonts,
 ) -> f32 {
     let mut cursor_x = start_x;
-    let line_height = segments
-        .iter()
-        .map(|segment| pdf_font_size(&segment.style) * 0.43)
-        .fold(PDF_BODY_LINE_HEIGHT_MM, f32::max);
+    let line_height = styled_pdf_line_height(segments);
 
     for segment in segments {
         if segment.text.is_empty() {
@@ -1330,6 +1869,13 @@ fn write_styled_pdf_line(
     }
 
     y - line_height
+}
+
+fn styled_pdf_line_height(segments: &[StyledTextSegment]) -> f32 {
+    segments
+        .iter()
+        .map(|segment| pdf_font_size(&segment.style) * 0.43)
+        .fold(PDF_BODY_LINE_HEIGHT_MM, f32::max)
 }
 
 fn draw_pdf_text_rule(layer: &PdfLayerReference, x: f32, y: f32, width: f32, style: &TextStyle) {
@@ -1662,10 +2208,35 @@ mod feature_stress_tests {
     }
 
     #[test]
-    fn pdf_export_handles_long_styled_notes_and_structured_tables() {
+    fn pdf_export_handles_code_boxes_long_notes_and_structured_tables() {
         let directory = TestDirectory::new("pdf");
         let path = directory.path.join("stress.pdf");
-        let mut content = String::from("Styled opening\n[[x2-table:table-one]]\n");
+        let mut content = String::from(
+            "Styled opening\n```python\nprint(\"Hello from PDF\")\n```\n```cpp\n#include <iostream>\nint main() {\n    std::cout << \"Hello from C++\";\n}\n```\n[[x2-table:table-one]]\n",
+        );
+        let python_block_from = content
+            .find("```python")
+            .map(|from| content[..from].chars().map(char::len_utf16).sum())
+            .unwrap();
+        let mut table = sample_table();
+        table.rows = (0..45)
+            .map(|index| {
+                vec![
+                    X2TableCell {
+                        text: format!(
+                            "Row {index}: a long table value that must wrap without losing any text"
+                        ),
+                        styles: vec![],
+                        active_style: None,
+                    },
+                    X2TableCell {
+                        text: format!("Value {index}\ncontinued"),
+                        styles: vec![],
+                        active_style: None,
+                    },
+                ]
+            })
+            .collect();
         for index in 0..250 {
             content.push_str(&format!(
                 "Line {index}: a deliberately long sentence that must wrap safely across PDF pages.\n"
@@ -1679,7 +2250,15 @@ mod feature_stress_tests {
                 to: 14,
                 style: sample_style(),
             }],
-            tables: vec![sample_table()],
+            tables: vec![table],
+            code_outputs: vec![PdfCodeOutput {
+                block_from: python_block_from,
+                status: "success".to_string(),
+                stdout: "Hello from PDF\n".to_string(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                message: "Python finished.".to_string(),
+            }],
         };
 
         export_note_pdf(path.to_string_lossy().to_string(), note).unwrap();
@@ -1754,6 +2333,73 @@ mod feature_stress_tests {
             Some((7, 27, "abc-123".to_string()))
         );
         assert_eq!(find_next_table_anchor("[[x2-table:]]", 0), None);
+    }
+
+    #[test]
+    fn pdf_table_layout_keeps_all_wrapped_and_explicit_lines() {
+        let text =
+            "First explicit line\nSecond line contains enough words to wrap across several lines";
+        let cell = X2TableCell {
+            text: text.to_string(),
+            styles: vec![],
+            active_style: None,
+        };
+        let layout = layout_pdf_table_row(&[cell], 28.0, 1);
+        let rendered_text = layout.cells[0]
+            .iter()
+            .flat_map(|line| line.iter())
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+
+        assert!(layout.cells[0].len() >= 3);
+        assert_eq!(rendered_text, text.replace('\n', ""));
+        assert!(layout.height > PDF_TABLE_MIN_ROW_HEIGHT_MM);
+    }
+
+    #[test]
+    fn pdf_code_box_parser_and_output_layout_keep_visible_content() {
+        let content = "before 👋\n```python\nprint('hello')\nprint('second')\n```\nafter";
+        let block = find_next_code_block(content, 0).expect("Python code block");
+        let block_from = content[..block.from]
+            .chars()
+            .map(char::len_utf16)
+            .sum::<usize>();
+        let output = PdfCodeOutput {
+            block_from,
+            status: "error".to_string(),
+            stdout: "first line\nsecond line\n".to_string(),
+            stderr: "ValueError: boom\n".to_string(),
+            exit_code: Some(1),
+            message: "Python finished with errors.".to_string(),
+        };
+        let output_lines = build_pdf_code_output_lines(Some(&output));
+        let visible_text = output_lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(block.language, "Python");
+        assert_eq!(block.code, "print('hello')\nprint('second')");
+        assert_eq!(block_from, 10);
+        assert!(visible_text.contains("Python finished with errors."));
+        assert!(visible_text.contains("first line\nsecond line"));
+        assert!(visible_text.contains("ValueError: boom"));
+        assert!(!visible_text.contains("Ctrl+Enter"));
+        assert!(!visible_text.contains("Esc select"));
+        assert_eq!(code_output_status(Some(&output)), "exit 1");
+    }
+
+    #[test]
+    fn pdf_text_block_spacing_ignores_empty_ranges_and_trailing_cursor_lines() {
+        assert!(build_pdf_text_block_lines("", &[]).is_empty());
+        assert_eq!(build_pdf_text_block_lines("paragraph", &[]).len(), 1);
+        assert_eq!(build_pdf_text_block_lines("paragraph\n", &[]).len(), 1);
+        assert_eq!(build_pdf_text_block_lines("paragraph\n\n", &[]).len(), 2);
+
+        let idle_lines = build_pdf_code_output_lines(None);
+        assert_eq!(idle_lines.len(), 1);
+        assert_eq!(idle_lines[0].text, "Not run yet.");
     }
 }
 
