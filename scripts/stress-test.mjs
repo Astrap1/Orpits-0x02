@@ -41,6 +41,28 @@ function loadCommandRegistry() {
   return context.exports;
 }
 
+function loadCommandSearch(registry) {
+  const source = fs.readFileSync(new URL("../src/CommandSearch.ts", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      esModuleInterop: true,
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022
+    }
+  }).outputText;
+  const context = {
+    exports: {},
+    module: { exports: {} },
+    require: (specifier) => {
+      if (specifier === "./CommandRegistry") return registry;
+      return require(specifier);
+    }
+  };
+  context.module.exports = context.exports;
+  vm.runInNewContext(compiled, context, { filename: "CommandSearch.ts" });
+  return context.exports;
+}
+
 function loadEditorSupport() {
   const source = fs.readFileSync(new URL("../src/pages/Editor.tsx", import.meta.url), "utf8");
   const sourceFile = ts.createSourceFile(
@@ -87,8 +109,17 @@ function loadEditorSupport() {
     "columnLettersToIndex",
     "parseTableFormula",
     "parseStructuredTableFormula",
+    "getStructuredTableFormulaMenuQuery",
+    "STRUCTURED_TABLE_GUIDES",
+    "getStructuredTableGuideLabel",
+    "getStructuredTableColumnLabel",
+    "getStructuredTableCellAccessibleLabel",
+    "getStructuredTableSelectionAnnouncement",
     "normalizeStructuredTable",
     "normalizeStructuredTables",
+    "resolveStructuredTableNumericCell",
+    "evaluateStructuredTableFormulaValue",
+    "recalculateStructuredTableFormulas",
     "evaluateStructuredTableFormula",
     "evaluateTableFormula",
     "getSafeFileName",
@@ -175,9 +206,15 @@ function makeCommandContext(documentText = "") {
   };
 }
 
-function testCommands(registry) {
+function testCommands(registry, commandSearch) {
   const commands = new Map(registry.CommandRegistry.map((command) => [command.name, command]));
   check(commands.size, 21, "Every documented command should be registered once");
+  check(registry.TableFormulaRegistry.map((command) => command.name), [
+    "sum", "avg", "mean", "median", "min", "max", "count"
+  ]);
+  check(registry.TableFormulaRegistry[0].signature, "SUM(A1:A3)");
+  check(commandSearch.getTableFormulaSuggestions("su").map((command) => command.name)[0], "sum");
+  check(commandSearch.getTableFormulaSuggestions("mdn").map((command) => command.name)[0], "median");
 
   for (const [name, fontSize] of [["title", "24"], ["header", "16"], ["body", "14"]]) {
     const { context, state } = makeCommandContext();
@@ -308,6 +345,65 @@ function testEditorLogic(editor) {
   check(editor.evaluateStructuredTableFormula(structuredTable, formula("sum", "C3:A1")), "1004.5");
   check(editor.evaluateStructuredTableFormula(structuredTable, formula("sum", "A1:D2")), null);
   check(editor.evaluateStructuredTableFormula(structuredTable, formula("sum", "C1:C3")), null);
+  check(editor.STRUCTURED_TABLE_GUIDES.editing, [
+    { key: "Tab", label: "Next / add column" },
+    { key: "Enter", label: "Next / add row" },
+    { key: "Shift+Tab", label: "Insert column" },
+    { key: "Shift+Enter", label: "Insert row" },
+    { key: "Esc", label: "Select cell" }
+  ]);
+  checkMatches(editor.getStructuredTableGuideLabel("row"), /Backspace: Delete row/);
+  check(editor.getStructuredTableFormulaMenuQuery("//"), "");
+  check(editor.getStructuredTableFormulaMenuQuery("//su"), "su");
+  check(editor.getStructuredTableFormulaMenuQuery("//sum("), null);
+  check(editor.getStructuredTableCellAccessibleLabel(1, 1), "Cell B2");
+  check(editor.getStructuredTableCellAccessibleLabel(1, 1, "Results"), "Cell B2, column Results");
+  check(editor.getStructuredTableCellAccessibleLabel(-1, 27, "Notes"), "Column AB header, Notes");
+  check(
+    editor.getStructuredTableSelectionAnnouncement(
+      { tableId: "table-1", rowIndex: 2, columnIndex: 3 },
+      "editing"
+    ),
+    "Editing Cell D3."
+  );
+  check(
+    editor.getStructuredTableSelectionAnnouncement(
+      { tableId: "table-1", rowIndex: 2, columnIndex: 3 },
+      "row"
+    ),
+    "Row 3 selected."
+  );
+  check(
+    editor.getStructuredTableSelectionAnnouncement(
+      { tableId: "table-1", rowIndex: 2, columnIndex: 27 },
+      "column"
+    ),
+    "Column AB selected."
+  );
+
+  const liveFormulaTable = {
+    id: "live-formulas",
+    columns: ["Input", "Total", "Linked", "Cycle"],
+    rows: [
+      [
+        { text: "1", styles: [] },
+        { text: "stale", formula: "//sum(A1:A3)", styles: [] },
+        { text: "stale", formula: "//max(B1:B1)", styles: [] },
+        { text: "stale", formula: "//sum(D1:D1)", styles: [] }
+      ],
+      [{ text: "2", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }],
+      [{ text: "3", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }, { text: "", styles: [] }]
+    ]
+  };
+  const firstFormulaPass = editor.recalculateStructuredTableFormulas(liveFormulaTable);
+  check(firstFormulaPass.rows[0][1].text, "6");
+  check(firstFormulaPass.rows[0][2].text, "6");
+  check(firstFormulaPass.rows[0][3].text, "#CYCLE!");
+  liveFormulaTable.rows[1][0].text = "20";
+  const secondFormulaPass = editor.recalculateStructuredTableFormulas(liveFormulaTable);
+  check(secondFormulaPass.rows[0][1].text, "24");
+  check(secondFormulaPass.rows[0][2].text, "24");
+  check(secondFormulaPass.rows[0][1].formula, "//sum(A1:A3)");
 
   const markdownDoc = Text.of([
     "| A | B | C |",
@@ -522,7 +618,8 @@ function testEditorLogic(editor) {
 }
 
 const registry = loadCommandRegistry();
+const commandSearch = loadCommandSearch(registry);
 const editor = loadEditorSupport();
-testCommands(registry);
+testCommands(registry, commandSearch);
 testEditorLogic(editor);
 console.log(`Frontend logic stress test passed: ${checks} assertions.`);

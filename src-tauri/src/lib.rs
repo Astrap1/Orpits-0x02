@@ -114,6 +114,8 @@ struct TextStyleRange {
 #[derive(Clone, Deserialize, Serialize)]
 struct X2TableCell {
     text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    formula: Option<String>,
     #[serde(default)]
     styles: Vec<TextStyleRange>,
     #[serde(rename = "activeStyle", default)]
@@ -1524,6 +1526,7 @@ fn write_pdf_table(
         .iter()
         .map(|column| X2TableCell {
             text: column.clone(),
+            formula: None,
             styles: vec![TextStyleRange {
                 from: 0,
                 to: column.chars().map(char::len_utf16).sum(),
@@ -2042,11 +2045,13 @@ mod feature_stress_tests {
             rows: vec![vec![
                 X2TableCell {
                     text: "alpha".to_string(),
+                    formula: None,
                     styles: vec![],
                     active_style: None,
                 },
                 X2TableCell {
                     text: "42".to_string(),
+                    formula: None,
                     styles: vec![TextStyleRange {
                         from: 0,
                         to: 2,
@@ -2085,7 +2090,7 @@ mod feature_stress_tests {
                 "columns": ["Name", "Value"],
                 "rows": [[
                     {"text": "alpha", "styles": []},
-                    {"text": "42", "styles": [], "activeStyle": null}
+                    {"text": "42", "formula": "//sum(B2:B3)", "styles": [], "activeStyle": null}
                 ]]
             }],
             "savedAt": "2026-07-26T00:00:00Z"
@@ -2100,6 +2105,10 @@ mod feature_stress_tests {
         assert_eq!(loaded.styles[0].to, 8);
         assert_eq!(loaded.tables.len(), 1);
         assert_eq!(loaded.tables[0].rows[0][1].text, "42");
+        assert_eq!(
+            loaded.tables[0].rows[0][1].formula.as_deref(),
+            Some("//sum(B2:B3)")
+        );
         assert_eq!(loaded.saved_at, "2026-07-26T00:00:00Z");
     }
 
@@ -2226,11 +2235,13 @@ mod feature_stress_tests {
                         text: format!(
                             "Row {index}: a long table value that must wrap without losing any text"
                         ),
+                        formula: None,
                         styles: vec![],
                         active_style: None,
                     },
                     X2TableCell {
                         text: format!("Value {index}\ncontinued"),
+                        formula: None,
                         styles: vec![],
                         active_style: None,
                     },
@@ -2341,6 +2352,7 @@ mod feature_stress_tests {
             "First explicit line\nSecond line contains enough words to wrap across several lines";
         let cell = X2TableCell {
             text: text.to_string(),
+            formula: None,
             styles: vec![],
             active_style: None,
         };

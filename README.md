@@ -92,7 +92,9 @@ While editing a cell, `Tab` moves to the next column and adds a column when the 
 
 In the table layer, tapping `Shift` cycles the selection from the current cell, to its entire row, to its entire column, and then back to the cell. Pressing `Backspace` while a row or column is selected deletes that row or column. A table always retains at least one row and one column.
 
-Tables also support calculations over spreadsheet-style cell ranges. For example, entering `//sum(A1:A3)` inside a table cell and pressing `Enter` replaces the formula with the calculated result. The supported operations are `sum`, `avg`, `mean`, `min`, `max`, and `count`.
+While a table is active, a compact shortcut guide appears beneath it. The guide changes with the current document, cell-navigation, cell-editing, row-selection, or column-selection mode, so the relevant actions remain visible without adding permanent buttons or interrupting keyboard-first editing. Tables expose grid, row, column-header, row-header, and cell semantics to assistive technologies; only the active cell participates in the keyboard focus order, and navigation, selection, insertion, deletion, and minimum-size errors are announced through a live region. The guide is part of the editor interface only and is not saved in the note or included in PDF exports.
+
+Tables also support live calculations over spreadsheet-style cell ranges. Typing `//` in a data cell opens a table-specific formula registry; the arrow keys select a formula and `Enter` inserts a template with the cursor inside its parentheses. For example, completing `//sum(A1:A3)` stores both the formula and its displayed result. If a referenced number or formula result changes, dependent formula cells recalculate immediately. Selecting a formula cell for editing reveals its formula again. The supported operations are `sum`, `avg`, `mean`, `median`, `min`, `max`, and `count`; circular references display `#CYCLE!` and invalid ranges display `#VALUE!`.
 
 ## 6. Fuzzy Search
 Fuzzy search improves the discoverability of commands. Since x2pad depends heavily on typed commands, users do not need to memorise every command exactly. The command menu accepts partial or imperfect command names and still returns useful suggestions.
@@ -265,7 +267,7 @@ The current `.x2` file includes:
 - `title`: Stores the note title.
 - `content`: Stores the note text as a single string.
 - `styles`: Stores formatting ranges such as font size, color, bold, italic, strikethrough, and underline.
-- `tables`: Stores structured tables, including their identifiers, columns, rows, cell text, and cell formatting.
+- `tables`: Stores structured tables, including their identifiers, columns, rows, cell text, optional live formulas, and cell formatting.
 - `savedAt`: Stores the timestamp for when the note was last saved.
 
 ## Example `.x2` File
@@ -294,7 +296,7 @@ The current `.x2` file includes:
 }
 ```
 
-This gives the app a working persistence layer for the current editor features. Python and C++ code boxes are preserved as readable fenced code blocks in `content`. Structured tables are represented by `[[x2-table:<id>]]` anchors in `content`, while their columns, rows, cell text, and cell formatting are stored in the `tables` field. Future `.x2` versions can add richer metadata while retaining version-aware loading.
+This gives the app a working persistence layer for the current editor features. Python and C++ code boxes are preserved as readable fenced code blocks in `content`. Structured tables are represented by `[[x2-table:<id>]]` anchors in `content`, while their columns, rows, cell text, optional formula source, and cell formatting are stored in the `tables` field. Future `.x2` versions can add richer metadata while retaining version-aware loading.
 
 # Architecture
 ![architecture](project-docs/architecture.jpg)
@@ -347,7 +349,7 @@ The frontend processes a table as follows:
 2. A CodeMirror decoration replaces the visible anchor with an interactive table widget.
 3. Editable table cells update the structured table state while keyboard handlers manage document, table, and cell interaction modes.
 4. `Tab`, `Enter`, arrow keys, and their supported `Shift` combinations navigate the table or add rows and columns.
-5. The formula parser validates supported operations and cell ranges, collects numeric values from the structured table, and replaces a valid formula with its result.
+5. Typing `//` inside a data cell opens the table formula registry. The formula engine validates ranges, stores the formula separately from its displayed value, resolves formula dependencies, and recalculates dependent cells whenever table values change.
 
 Unlike Python execution, table editing and calculations do not require the Rust backend because they modify frontend state. When a note is saved, the frontend sends the table data together with the title, document content, and text style ranges to the Rust backend for serialisation in the `.x2` file.
 
@@ -501,7 +503,7 @@ x2pad validates input at several boundaries:
 ## 4. Versioned Local-First Persistence
 Normal notes are self-contained local files and do not require an account or database. The `format` field identifies an x2pad note, while `version` supports file-format evolution and backward-compatible loading. Version 1 `.x2` files can still load, while Version 2 adds structured tables without removing the existing plain-text content and style-range model. The earlier `.x2` section contains the complete schema and rationale.
 
-Structured tables are stored as data rather than raw HTML. The document content stores a table anchor such as `[[x2-table:<id>]]`, while the actual table columns, rows, cell text, and cell formatting are stored separately in the `tables` field. This keeps editor content, table state, and persistence cleaner because the app does not need to parse or save complex HTML inside the note body.
+Structured tables are stored as data rather than raw HTML. The document content stores a table anchor such as `[[x2-table:<id>]]`, while the actual table columns, rows, cell text, optional formula source, and cell formatting are stored separately in the `tables` field. This keeps editor content, table state, and persistence cleaner because the app does not need to parse or save complex HTML inside the note body.
 
 ## 5. Controlled State Management
 React state stores interface-level information such as command menu visibility, note selection, AI session status, and table data. CodeMirror state handles editor-specific behaviour such as decorations, keymaps, cursor movement, command highlighting, and widget rendering. Refs retain live values that should not trigger expensive re-renders, such as style ranges and structured table state.
@@ -531,19 +533,17 @@ We developed the first usable version of the `\\` AI registry using the Gemini A
 
 In the third milestone, we added executable Python code boxes through `//code`. Code boxes support Python syntax highlighting, keyboard navigation, `Ctrl+Enter` execution, and an output panel for results and errors. Python source is sent to the Tauri/Rust backend and executed using a locally installed interpreter.
 
-We also implemented structured tables through `//table`, including keyboard-based cell navigation, automatic row and column creation, row and column deletion, and formulas such as `sum`, `avg`, `mean`, `min`, `max`, and `count`. Version 2 of the `.x2` format added structured-table persistence while retaining compatibility with earlier notes.
+We also implemented structured tables through `//table`, including keyboard-based cell navigation, automatic row and column creation, row and column deletion, and formulas such as `sum`, `avg`, `mean`, `median`, `min`, `max`, and `count`. Formula discovery now uses its own keyboard-operated registry, and formulas persist and recalculate when referenced values change. Version 2 of the `.x2` format added structured-table persistence while retaining compatibility with earlier notes.
 
 Finally, five participants completed the first round of user testing. Their feedback led us to change the default table from 3×3 to 1×1 and highlighted the need for fuzzy command search to make longer commands easier to discover and enter.
 
 # Splashdown Objectives
 Finally, our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
 
-C++ execution, language preselection, fuzzy command search, structured-table PDF wrapping, and visual code-box PDF export have now been completed. Users can create Python or C++ code boxes explicitly while the original `//code` command remains compatible with Python. The command menu now uses Fuse.js alongside prefix and ordered-letter matching so that partial or imperfect command names can return useful suggestions. Exported tables use dynamic row heights, preserve wrapped and explicit lines, keep rows intact across page breaks, and repeat their headers on new pages. Exported code boxes reproduce the editor's language header, dark source panel, monospace content, run status, and visible standard or error output.
+C++ execution, language preselection, fuzzy command search, structured-table PDF wrapping, visual code-box PDF export, contextual table shortcut guidance, planned structured-table accessibility improvements, and live discoverable table formulas have now been completed. Users can create Python or C++ code boxes explicitly while the original `//code` command remains compatible with Python. The command menu now uses Fuse.js alongside prefix and ordered-letter matching so that partial or imperfect command names can return useful suggestions. Exported tables use dynamic row heights, preserve wrapped and explicit lines, keep rows intact across page breaks, and repeat their headers on new pages. Exported code boxes reproduce the editor's language header, dark source panel, monospace content, run status, and visible standard or error output. Active tables now display a compact guide that adapts to document, cell, row, column, and editing modes without adding persistent toolbar controls. Accessible grid semantics, labelled cell coordinates, roving focus, selection state, live announcements, and high-contrast selection outlines support keyboard and screen-reader use without introducing horizontal mouse-driven controls. A table-specific `//` registry now exposes the available calculations, while persisted formulas update automatically when referenced values or formula results change.
 
 The objectives are:
 
-- Improve structured-table accessibility, cell layout, and handling of larger tables
-- Add clearer visible controls for managing table rows and columns while preserving keyboard-first navigation and formulas
 - Continue user testing and use the findings to refine table editing, code-box interaction, and export quality
 - Investigate a managed AI access system so that users do not need to obtain and configure their own Gemini API key
 - Design usage tracking, quotas, secure API-key handling, and cost controls for the managed AI system before making it available to users
@@ -564,13 +564,13 @@ The managed AI access system is an exploratory objective because it would requir
 
 ### Automated Verification
 
-The following results were verified on 9 August 2026:
+The following results were verified on 11 August 2026:
 
 | Command | Purpose | Result |
 |---|---|---|
 | `npm run build` | Compiles TypeScript and creates the production Vite frontend build | Passed |
 | `npm run test:all` | Runs the production build, frontend stress suite, Rust formatting check, and Rust tests | Passed |
-| `npm run test:stress` | Checks command actions and arguments, table formulas, table/code-box delete-undo-redo behaviour, Python/C++ code-block parsing, AI-response parsing, style ranges, paths, and frontend utility logic | 2,158 assertions passed |
+| `npm run test:stress` | Checks command actions and arguments, table-formula registry matching, live and chained table formulas, formula errors, contextual shortcut guidance and accessible cell announcements, table/code-box delete-undo-redo behaviour, Python/C++ code-block parsing, AI-response parsing, style ranges, paths, and frontend utility logic | 2,188 assertions passed |
 | `cd src-tauri && cargo test` | Checks `.x2` validation and compatibility, structured-table persistence, folder loading, PDF helpers, text spacing, multi-line table and code-box export, Python execution limits, and C++ compilation and error reporting | 15 tests passed |
 
 The stress-test script performs deterministic logic checks; it does not simulate real typing speed or measure visual interface responsiveness.

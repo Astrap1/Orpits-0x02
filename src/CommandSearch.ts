@@ -1,9 +1,19 @@
 import Fuse from "fuse.js";
-import { CommandRegistry } from "./CommandRegistry";
+import { CommandRegistry, TableFormulaRegistry } from "./CommandRegistry";
 
 export type CommandSuggestion = (typeof CommandRegistry)[number];
 
 const commandFuse = new Fuse(CommandRegistry, {
+  includeScore: true,
+  ignoreLocation: true,
+  threshold: 0.4,
+  keys: [
+    { name: "name", weight: 0.9 },
+    { name: "description", weight: 0.1 }
+  ]
+});
+
+const tableFormulaFuse = new Fuse(TableFormulaRegistry, {
   includeScore: true,
   ignoreLocation: true,
   threshold: 0.4,
@@ -43,6 +53,30 @@ export function getCommandSuggestions(query: string): CommandSuggestion[] {
     !prefixMatches.includes(command) && isOrderedLetterMatch(command.name, normalizedQuery)
   ));
   const fuzzyMatches = commandFuse.search(normalizedQuery).map(({ item }) => item);
+
+  return [
+    ...prefixMatches,
+    ...abbreviatedMatches,
+    ...fuzzyMatches.filter((command) => (
+      !prefixMatches.includes(command) && !abbreviatedMatches.includes(command)
+    ))
+  ];
+}
+
+export function getTableFormulaSuggestions(query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+
+  if (!normalizedQuery) {
+    return TableFormulaRegistry;
+  }
+
+  const prefixMatches = TableFormulaRegistry.filter((command) => (
+    command.name.startsWith(normalizedQuery)
+  ));
+  const abbreviatedMatches = TableFormulaRegistry.filter((command) => (
+    !prefixMatches.includes(command) && isOrderedLetterMatch(command.name, normalizedQuery)
+  ));
+  const fuzzyMatches = tableFormulaFuse.search(normalizedQuery).map(({ item }) => item);
 
   return [
     ...prefixMatches,

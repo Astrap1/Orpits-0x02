@@ -12,7 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CommandRegistry, TEXT_COLOR_OPTIONS } from "../CommandRegistry";
-import { getCommandSuggestions } from "../CommandSearch";
+import { getCommandSuggestions, getTableFormulaSuggestions } from "../CommandSearch";
 import "../styles/Editor.css";
 
 const DEFAULT_FONT_SIZE = "14";
@@ -165,6 +165,7 @@ interface TableBlock {
 
 interface StructuredTableCell {
   text: string;
+  formula?: string;
   styles?: TextStyleRange[];
   activeStyle?: ActiveTextStyle;
 }
@@ -179,6 +180,14 @@ interface StructuredTableCellTarget {
   tableId: string;
   rowIndex: number;
   columnIndex: number;
+}
+
+interface StructuredTableFormulaMenuState {
+  target: StructuredTableCellTarget;
+  query: string;
+  top: number;
+  left: number;
+  placement: "below" | "above";
 }
 
 interface PendingStyleRestore {
@@ -198,6 +207,7 @@ const STRUCTURED_TABLE_ANCHOR_PATTERN = /\[\[x2-table:([a-zA-Z0-9_-]+)\]\]/g;
 const TABLE_WIDGET_INPUT_EVENT = "x2pad-table-cell-input";
 const TABLE_WIDGET_KEY_EVENT = "x2pad-table-cell-key";
 const TABLE_WIDGET_FOCUS_EVENT = "x2pad-table-cell-focus";
+const TABLE_WIDGET_FORMULA_MENU_KEY_EVENT = "x2pad-table-formula-menu-key";
 
 const getResolvedColor = (color: string) => colorValues[color] ?? color;
 
@@ -410,7 +420,7 @@ function keepStructuredCellCaretContained(
   });
 }
 
-function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
+function scheduleStructuredCellFocus(target: StructuredTableCellTarget, message?: string) {
   let attempts = 0;
 
   const focusCell = () => {
@@ -418,7 +428,13 @@ function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
     const element = document.querySelector<HTMLElement>(getStructuredTableCellSelector(target));
 
     if (element) {
-      element.closest(".structured-table-widget")
+      const wrapper = element.closest<HTMLElement>(".structured-table-widget");
+
+      if (element.dataset.formula) {
+        element.textContent = element.dataset.formula;
+      }
+
+      wrapper
         ?.querySelectorAll(
           ".structured-table-cell-editor.is-navigating, " +
           ".structured-table-cell-editor.is-row-selected, " +
@@ -427,6 +443,12 @@ function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
         .forEach((cell) => {
           cell.classList.remove("is-navigating", "is-row-selected", "is-column-selected");
         });
+      if (wrapper) {
+        setStructuredTableRovingCell(wrapper, element);
+        setStructuredTableAriaSelection(wrapper, [element]);
+        setStructuredTableGuideMode(wrapper, "editing");
+        announceStructuredTable(wrapper, message ?? getStructuredTableSelectionAnnouncement(target, "editing"));
+      }
       element.focus();
       placeCaretAtEnd(element);
       return;
@@ -441,10 +463,191 @@ function scheduleStructuredCellFocus(target: StructuredTableCellTarget) {
 }
 
 type StructuredTableSelectionMode = "cell" | "row" | "column";
+type StructuredTableGuideMode = "inactive" | "document" | "navigating" | "editing" | "row" | "column";
+
+const STRUCTURED_TABLE_GUIDES: Record<Exclude<StructuredTableGuideMode, "inactive">, Array<{
+  key: string;
+  label: string;
+}>> = {
+  document: [
+    { key: "Enter", label: "Open table" },
+    { key: "Backspace", label: "Delete table" },
+    { key: "↑ / ↓", label: "Move past" }
+  ],
+  navigating: [
+    { key: "Arrow keys", label: "Move" },
+    { key: "Enter", label: "Edit" },
+    { key: "Shift", label: "Select row / column" },
+    { key: "Shift+Enter", label: "Insert row" },
+    { key: "Shift+Tab", label: "Insert column" },
+    { key: "Esc", label: "Exit" }
+  ],
+  editing: [
+    { key: "Tab", label: "Next / add column" },
+    { key: "Enter", label: "Next / add row" },
+    { key: "Shift+Tab", label: "Insert column" },
+    { key: "Shift+Enter", label: "Insert row" },
+    { key: "Esc", label: "Select cell" }
+  ],
+  row: [
+    { key: "Shift", label: "Select column" },
+    { key: "Shift+Enter", label: "Insert row" },
+    { key: "Backspace", label: "Delete row" },
+    { key: "Esc", label: "Exit" }
+  ],
+  column: [
+    { key: "Shift", label: "Select cell" },
+    { key: "Shift+Tab", label: "Insert column" },
+    { key: "Backspace", label: "Delete column" },
+    { key: "Esc", label: "Exit" }
+  ]
+};
+
+function getStructuredTableGuideLabel(mode: Exclude<StructuredTableGuideMode, "inactive">) {
+  return STRUCTURED_TABLE_GUIDES[mode]
+    .map((shortcut) => `${shortcut.key}: ${shortcut.label}`)
+    .join(". ");
+}
+
+function placeCaretAtTextOffset(element: HTMLElement, offset: number) {
+  const selection = window.getSelection();
+  const range = document.createRange();
+  const textNode = element.firstChild;
+
+  if (!textNode) {
+    placeCaretAtEnd(element);
+    return;
+  }
+
+  range.setStart(textNode, Math.max(0, Math.min(offset, textNode.textContent?.length ?? 0)));
+  range.collapse(true);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function getStructuredTableCellAccessibleLabel(
+  rowIndex: number,
+  columnIndex: number,
+  columnName = ""
+) {
+  const columnLabel = getStructuredTableColumnLabel(columnIndex);
+  const namedColumn = columnName.trim();
+
+  if (rowIndex < 0) {
+    return namedColumn
+      ? `Column ${columnLabel} header, ${namedColumn}`
+      : `Column ${columnLabel} header`;
+  }
+
+  return namedColumn
+    ? `Cell ${columnLabel}${rowIndex + 1}, column ${namedColumn}`
+    : `Cell ${columnLabel}${rowIndex + 1}`;
+}
+
+function getStructuredTableSelectionAnnouncement(
+  target: StructuredTableCellTarget,
+  mode: StructuredTableSelectionMode | "editing"
+) {
+  const columnLabel = getStructuredTableColumnLabel(target.columnIndex);
+
+  if (mode === "row") {
+    return `Row ${target.rowIndex + 1} selected.`;
+  }
+  if (mode === "column") {
+    return `Column ${columnLabel} selected.`;
+  }
+
+  const location = target.rowIndex < 0
+    ? `Column ${columnLabel} header`
+    : `Cell ${columnLabel}${target.rowIndex + 1}`;
+  return mode === "editing" ? `Editing ${location}.` : `${location} selected.`;
+}
+
+function setStructuredTableRovingCell(wrapper: HTMLElement, activeCell: HTMLElement) {
+  wrapper.querySelectorAll<HTMLElement>(".structured-table-cell-editor")
+    .forEach((cell) => {
+      cell.tabIndex = cell === activeCell ? 0 : -1;
+    });
+}
+
+function setStructuredTableAriaSelection(wrapper: HTMLElement, selectedEditors: HTMLElement[]) {
+  const selectedCells = new Set(selectedEditors.map((editor) => editor.parentElement));
+
+  wrapper.querySelectorAll<HTMLElement>("[role=\"gridcell\"], [role=\"columnheader\"]")
+    .forEach((cell) => {
+      cell.setAttribute("aria-selected", selectedCells.has(cell) ? "true" : "false");
+    });
+}
+
+function announceStructuredTable(wrapper: HTMLElement, message: string) {
+  const announcement = wrapper.querySelector<HTMLElement>(".structured-table-accessibility-announcement");
+  if (!announcement) {
+    return;
+  }
+
+  announcement.textContent = "";
+  requestAnimationFrame(() => {
+    announcement.textContent = message;
+  });
+}
+
+function setStructuredTableGuideMode(wrapper: HTMLElement, mode: StructuredTableGuideMode) {
+  if (wrapper.dataset.tableGuideMode === mode) {
+    return;
+  }
+
+  wrapper.dataset.tableGuideMode = mode;
+  const announcement = wrapper.querySelector<HTMLElement>(".structured-table-shortcut-announcement");
+  if (announcement) {
+    announcement.textContent = mode === "inactive" ? "" : getStructuredTableGuideLabel(mode);
+  }
+}
+
+function createStructuredTableShortcutGuide(tableId: string) {
+  const guide = document.createElement("div");
+  guide.className = "structured-table-shortcut-guide";
+  guide.id = `structured-table-guide-${tableId}`;
+  guide.setAttribute("role", "group");
+  guide.setAttribute("aria-label", "Table keyboard shortcuts");
+
+  for (const [mode, shortcuts] of Object.entries(STRUCTURED_TABLE_GUIDES)) {
+    const group = document.createElement("div");
+    group.className = "structured-table-shortcut-group";
+    group.dataset.guideMode = mode;
+
+    for (const shortcut of shortcuts) {
+      const item = document.createElement("span");
+      item.className = "structured-table-shortcut-item";
+      const key = document.createElement("kbd");
+      const label = document.createElement("span");
+      key.textContent = shortcut.key;
+      label.textContent = shortcut.label;
+      item.append(key, label);
+      group.append(item);
+    }
+
+    guide.append(group);
+  }
+
+  const announcement = document.createElement("span");
+  announcement.className = "structured-table-shortcut-announcement";
+  announcement.setAttribute("role", "status");
+  announcement.setAttribute("aria-live", "polite");
+  guide.append(announcement);
+
+  const accessibilityAnnouncement = document.createElement("span");
+  accessibilityAnnouncement.className = "structured-table-accessibility-announcement";
+  accessibilityAnnouncement.setAttribute("role", "status");
+  accessibilityAnnouncement.setAttribute("aria-live", "polite");
+  accessibilityAnnouncement.setAttribute("aria-atomic", "true");
+  guide.append(accessibilityAnnouncement);
+  return guide;
+}
 
 function scheduleStructuredCellNavigation(
   target: StructuredTableCellTarget,
-  selectionMode: StructuredTableSelectionMode = "cell"
+  selectionMode: StructuredTableSelectionMode = "cell",
+  message?: string
 ) {
   let attempts = 0;
 
@@ -463,16 +666,27 @@ function scheduleStructuredCellNavigation(
       });
 
       if (selectionMode === "row") {
-        wrapper.querySelectorAll<HTMLElement>(
+        const selectedCells = Array.from(wrapper.querySelectorAll<HTMLElement>(
           `.structured-table-cell-editor[data-row-index="${target.rowIndex}"]`
-        ).forEach((cell) => cell.classList.add("is-row-selected"));
+        ));
+        selectedCells.forEach((cell) => cell.classList.add("is-row-selected"));
+        setStructuredTableAriaSelection(wrapper, selectedCells);
       } else if (selectionMode === "column") {
-        wrapper.querySelectorAll<HTMLElement>(
+        const selectedCells = Array.from(wrapper.querySelectorAll<HTMLElement>(
           `.structured-table-cell-editor[data-column-index="${target.columnIndex}"]`
-        ).forEach((cell) => cell.classList.add("is-column-selected"));
+        ));
+        selectedCells.forEach((cell) => cell.classList.add("is-column-selected"));
+        setStructuredTableAriaSelection(wrapper, selectedCells);
       } else {
         element.classList.add("is-navigating");
+        setStructuredTableAriaSelection(wrapper, [element]);
       }
+      setStructuredTableRovingCell(wrapper, element);
+      setStructuredTableGuideMode(wrapper, selectionMode === "cell" ? "navigating" : selectionMode);
+      announceStructuredTable(
+        wrapper,
+        message ?? getStructuredTableSelectionAnnouncement(target, selectionMode)
+      );
       wrapper.focus();
       return;
     }
@@ -486,7 +700,7 @@ function scheduleStructuredCellNavigation(
 }
 
 function getStructuredTableCellCommand(text: string) {
-  const formulaCommand = text.match(/\/\/(sum|avg|mean|min|max|count)\(([A-Z]+\d+:[A-Z]+\d+)\)\s*$/i);
+  const formulaCommand = text.match(/\/\/(sum|avg|mean|median|min|max|count)\(([A-Z]+\d+:[A-Z]+\d+)\)\s*$/i);
 
   if (formulaCommand) {
     return {
@@ -522,9 +736,22 @@ function getStructuredTableColumnLabel(index: number) {
   return label;
 }
 
-function createStructuredTableCellElement(tableId: string, rowIndex: number, columnIndex: number, cell: StructuredTableCell) {
+function createStructuredTableCellElement(
+  tableId: string,
+  rowIndex: number,
+  columnIndex: number,
+  columnName: string,
+  cell: StructuredTableCell
+) {
   const cellElement = document.createElement("td");
   const editor = document.createElement("div");
+
+  cellElement.setAttribute("role", "gridcell");
+  cellElement.setAttribute("aria-selected", "false");
+  cellElement.setAttribute(
+    "headers",
+    `structured-table-${tableId}-column-${columnIndex} structured-table-${tableId}-row-${rowIndex}`
+  );
 
   editor.className = "structured-table-cell-editor";
   editor.contentEditable = "true";
@@ -532,25 +759,77 @@ function createStructuredTableCellElement(tableId: string, rowIndex: number, col
   editor.dataset.tableId = tableId;
   editor.dataset.rowIndex = String(rowIndex);
   editor.dataset.columnIndex = String(columnIndex);
+  if (cell.formula) {
+    editor.dataset.formula = cell.formula;
+    editor.dataset.computedValue = cell.text;
+  }
+  editor.tabIndex = -1;
   editor.setAttribute("role", "textbox");
-  editor.setAttribute("aria-label", `Table cell ${rowIndex + 1}, ${columnIndex + 1}`);
+  editor.setAttribute("aria-label", getStructuredTableCellAccessibleLabel(rowIndex, columnIndex, columnName));
   editor.setAttribute("style", getTextStyleAttribute(cell.activeStyle ?? defaultTextStyle));
   appendStyledText(editor, cell.text, cell.styles ?? []);
 
   editor.addEventListener("focus", () => {
+    const wrapper = editor.closest<HTMLElement>(".structured-table-widget");
+    if (editor.dataset.formula) {
+      editor.textContent = editor.dataset.formula;
+      placeCaretAtEnd(editor);
+    }
+    if (wrapper) {
+      setStructuredTableRovingCell(wrapper, editor);
+      setStructuredTableAriaSelection(wrapper, [editor]);
+      setStructuredTableGuideMode(wrapper, "editing");
+      announceStructuredTable(
+        wrapper,
+        getStructuredTableSelectionAnnouncement({ tableId, rowIndex, columnIndex }, "editing")
+      );
+    }
     dispatchTableWidgetEvent(TABLE_WIDGET_FOCUS_EVENT, { tableId, rowIndex, columnIndex });
   });
   editor.addEventListener("input", () => {
+    delete editor.dataset.formula;
+    delete editor.dataset.computedValue;
+    const text = editor.textContent ?? "";
+    const formulaMenuQuery = getStructuredTableFormulaMenuQuery(text);
+    const bounds = editor.getBoundingClientRect();
     dispatchTableWidgetEvent(TABLE_WIDGET_INPUT_EVENT, {
       tableId,
       rowIndex,
       columnIndex,
-      text: editor.textContent ?? ""
+      text,
+      formulaMenuQuery,
+      menuCoords: {
+        top: bounds.top,
+        bottom: bounds.bottom,
+        left: bounds.left
+      }
     });
+  });
+  editor.addEventListener("blur", () => {
+    if (editor.dataset.formula) {
+      editor.textContent = editor.dataset.computedValue ?? "";
+    }
   });
   editor.addEventListener("keydown", (event) => {
     keepStructuredCellCaretContained(editor, event);
-    const command = getStructuredTableCellCommand(editor.textContent ?? "");
+    const text = editor.textContent ?? "";
+    const formulaMenuQuery = getStructuredTableFormulaMenuQuery(text);
+    const command = getStructuredTableCellCommand(text);
+
+    if (
+      formulaMenuQuery !== null &&
+      ["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key)
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      dispatchTableWidgetEvent(TABLE_WIDGET_FORMULA_MENU_KEY_EVENT, {
+        tableId,
+        rowIndex,
+        columnIndex,
+        key: event.key
+      });
+      return;
+    }
 
     if (
       event.key === "Tab" ||
@@ -594,6 +873,7 @@ class StructuredTableWidget extends WidgetType {
   toDOM() {
     const wrapper = document.createElement("div");
     const tableElement = document.createElement("table");
+    const hasColumnNames = this.table.columns.some((column) => column.trim().length > 0);
 
     wrapper.className = [
       "structured-table-widget",
@@ -602,13 +882,23 @@ class StructuredTableWidget extends WidgetType {
     wrapper.contentEditable = "false";
     wrapper.tabIndex = -1;
     wrapper.dataset.tableId = this.table.id;
+    wrapper.dataset.tableGuideMode = this.isSelected ? "document" : "inactive";
     tableElement.className = "structured-table";
+    tableElement.setAttribute("role", "grid");
+    tableElement.setAttribute(
+      "aria-label",
+      `Structured table with ${this.table.rows.length} rows and ${this.table.columns.length} columns`
+    );
+    tableElement.setAttribute("aria-rowcount", String(this.table.rows.length + (hasColumnNames ? 2 : 1)));
+    tableElement.setAttribute("aria-colcount", String(this.table.columns.length + 1));
+    tableElement.setAttribute("aria-describedby", `structured-table-guide-${this.table.id}`);
 
     const thead = document.createElement("thead");
     const formulaHeaderRow = document.createElement("tr");
     const cornerHeader = document.createElement("th");
 
     formulaHeaderRow.className = "structured-table-formula-axis-row";
+    formulaHeaderRow.setAttribute("role", "row");
     cornerHeader.className = "structured-table-axis-corner";
     cornerHeader.setAttribute("aria-hidden", "true");
     formulaHeaderRow.append(cornerHeader);
@@ -617,17 +907,22 @@ class StructuredTableWidget extends WidgetType {
       const labelHeader = document.createElement("th");
 
       labelHeader.className = "structured-table-axis-header";
+      labelHeader.id = `structured-table-${this.table.id}-column-${columnIndex}`;
       labelHeader.textContent = getStructuredTableColumnLabel(columnIndex);
+      labelHeader.scope = "col";
+      labelHeader.setAttribute("role", "columnheader");
+      labelHeader.setAttribute("aria-selected", "false");
       labelHeader.setAttribute("aria-label", `Formula column ${getStructuredTableColumnLabel(columnIndex)}`);
       formulaHeaderRow.append(labelHeader);
     });
 
     thead.append(formulaHeaderRow);
 
-    if (this.table.columns.some((column) => column.trim().length > 0)) {
+    if (hasColumnNames) {
       const headerRow = document.createElement("tr");
       const headerCorner = document.createElement("th");
 
+      headerRow.setAttribute("role", "row");
       headerCorner.className = "structured-table-axis-corner";
       headerCorner.setAttribute("aria-hidden", "true");
       headerRow.append(headerCorner);
@@ -642,8 +937,15 @@ class StructuredTableWidget extends WidgetType {
         headerEditor.dataset.tableId = this.table.id;
         headerEditor.dataset.rowIndex = "-1";
         headerEditor.dataset.columnIndex = String(columnIndex);
+        headerEditor.tabIndex = -1;
         headerEditor.setAttribute("role", "textbox");
-        headerEditor.setAttribute("aria-label", `Table header ${columnIndex + 1}`);
+        headerEditor.setAttribute(
+          "aria-label",
+          getStructuredTableCellAccessibleLabel(-1, columnIndex, column)
+        );
+        header.setAttribute("role", "columnheader");
+        header.setAttribute("aria-selected", "false");
+        header.setAttribute("headers", `structured-table-${this.table.id}-column-${columnIndex}`);
         headerEditor.addEventListener("input", () => {
           dispatchTableWidgetEvent(TABLE_WIDGET_INPUT_EVENT, {
             tableId: this.table.id,
@@ -653,6 +955,20 @@ class StructuredTableWidget extends WidgetType {
           });
         });
         headerEditor.addEventListener("focus", () => {
+          const wrapper = headerEditor.closest<HTMLElement>(".structured-table-widget");
+          if (wrapper) {
+            setStructuredTableRovingCell(wrapper, headerEditor);
+            setStructuredTableAriaSelection(wrapper, [headerEditor]);
+            setStructuredTableGuideMode(wrapper, "editing");
+            announceStructuredTable(
+              wrapper,
+              getStructuredTableSelectionAnnouncement({
+                tableId: this.table.id,
+                rowIndex: -1,
+                columnIndex
+              }, "editing")
+            );
+          }
           dispatchTableWidgetEvent(TABLE_WIDGET_FOCUS_EVENT, {
             tableId: this.table.id,
             rowIndex: -1,
@@ -692,8 +1008,12 @@ class StructuredTableWidget extends WidgetType {
       const rowElement = document.createElement("tr");
       const rowLabel = document.createElement("th");
 
+      rowElement.setAttribute("role", "row");
       rowLabel.className = "structured-table-axis-header structured-table-row-axis";
+      rowLabel.id = `structured-table-${this.table.id}-row-${rowIndex}`;
       rowLabel.textContent = String(rowIndex + 1);
+      rowLabel.scope = "row";
+      rowLabel.setAttribute("role", "rowheader");
       rowLabel.setAttribute("aria-label", `Formula row ${rowIndex + 1}`);
       rowElement.append(rowLabel);
 
@@ -702,6 +1022,7 @@ class StructuredTableWidget extends WidgetType {
           this.table.id,
           rowIndex,
           columnIndex,
+          this.table.columns[columnIndex] ?? "",
           row[columnIndex] ?? { text: "", styles: [] }
         ));
       });
@@ -709,7 +1030,7 @@ class StructuredTableWidget extends WidgetType {
       tbody.append(rowElement);
     });
     tableElement.append(tbody);
-    wrapper.append(tableElement);
+    wrapper.append(tableElement, createStructuredTableShortcutGuide(this.table.id));
     return wrapper;
   }
 
@@ -1912,6 +2233,11 @@ function normalizeCodeLanguage(language?: string): CodeLanguage | null {
   return null;
 }
 
+function getStructuredTableFormulaMenuQuery(text: string) {
+  const match = text.match(/^\/\/([a-z]*)$/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
 function resolveCodeCommandLanguage(argument?: string, selectedCommandName?: string) {
   const selectedAlias = selectedCommandName
     ?.trim()
@@ -2468,6 +2794,71 @@ function evaluateStructuredTableFormula(
   formula: NonNullable<ReturnType<typeof parseStructuredTableFormula>>
 ) {
   const normalizedTable = normalizeStructuredTable(table);
+  const result = evaluateStructuredTableFormulaValue(
+    normalizedTable,
+    formula,
+    new Set<string>(),
+    new Map<string, StructuredTableNumericResult>()
+  );
+
+  return result.kind === "number" ? String(result.value) : null;
+}
+
+type StructuredTableNumericResult =
+  | { kind: "number"; value: number }
+  | { kind: "empty" }
+  | { kind: "error"; code: "CYCLE" | "VALUE" };
+
+function resolveStructuredTableNumericCell(
+  table: StructuredTable,
+  rowIndex: number,
+  columnIndex: number,
+  visiting: Set<string>,
+  cache: Map<string, StructuredTableNumericResult>
+): StructuredTableNumericResult {
+  const key = `${rowIndex}:${columnIndex}`;
+  const cached = cache.get(key);
+
+  if (cached) {
+    return cached;
+  }
+  if (visiting.has(key)) {
+    return { kind: "error", code: "CYCLE" };
+  }
+
+  const cell = table.rows[rowIndex]?.[columnIndex];
+  if (!cell) {
+    return { kind: "empty" };
+  }
+
+  const formula = cell.formula ? parseTableFormula(cell.formula) : null;
+  if (cell.formula && !formula) {
+    return { kind: "error", code: "VALUE" };
+  }
+
+  let result: StructuredTableNumericResult;
+  if (formula) {
+    visiting.add(key);
+    result = evaluateStructuredTableFormulaValue(table, formula, visiting, cache);
+    visiting.delete(key);
+  } else {
+    const cellText = cell.text.trim().replace(/,/g, "");
+    const value = Number(cellText);
+    result = cellText && Number.isFinite(value)
+      ? { kind: "number", value }
+      : { kind: "empty" };
+  }
+
+  cache.set(key, result);
+  return result;
+}
+
+function evaluateStructuredTableFormulaValue(
+  table: StructuredTable,
+  formula: NonNullable<ReturnType<typeof parseStructuredTableFormula>>,
+  visiting: Set<string>,
+  cache: Map<string, StructuredTableNumericResult>
+): StructuredTableNumericResult {
   const fromRow = Math.min(formula.fromRow, formula.toRow);
   const toRow = Math.max(formula.fromRow, formula.toRow);
   const fromColumn = Math.min(formula.fromColumn, formula.toColumn);
@@ -2477,58 +2868,118 @@ function evaluateStructuredTableFormula(
   if (
     fromRow < 0 ||
     fromColumn < 0 ||
-    toRow >= normalizedTable.rows.length ||
-    toColumn >= normalizedTable.columns.length
+    toRow >= table.rows.length ||
+    toColumn >= table.columns.length
   ) {
-    return null;
+    return { kind: "error", code: "VALUE" };
   }
 
   for (let rowIndex = fromRow; rowIndex <= toRow; rowIndex += 1) {
     for (let columnIndex = fromColumn; columnIndex <= toColumn; columnIndex += 1) {
-      const cellText = normalizedTable.rows[rowIndex]?.[columnIndex]?.text.trim().replace(/,/g, "") ?? "";
-
-      if (!cellText) {
-        continue;
+      const result = resolveStructuredTableNumericCell(table, rowIndex, columnIndex, visiting, cache);
+      if (result.kind === "error") {
+        return result;
       }
-
-      const value = Number(cellText);
-
-      if (Number.isFinite(value)) {
-        values.push(value);
+      if (result.kind === "number") {
+        values.push(result.value);
       }
     }
   }
 
   if (values.length === 0) {
-    return null;
+    return { kind: "empty" };
   }
 
   if (formula.operation === "count") {
-    return String(values.length);
+    return { kind: "number", value: values.length };
   }
 
   if (formula.operation === "sum") {
-    return String(values.reduce((total, value) => total + value, 0));
+    return { kind: "number", value: values.reduce((total, value) => total + value, 0) };
   }
 
   if (formula.operation === "avg" || formula.operation === "mean") {
-    return String(values.reduce((total, value) => total + value, 0) / values.length);
+    return {
+      kind: "number",
+      value: values.reduce((total, value) => total + value, 0) / values.length
+    };
   }
 
   if (formula.operation === "min") {
-    return String(Math.min(...values));
+    return { kind: "number", value: Math.min(...values) };
   }
 
   if (formula.operation === "max") {
-    return String(Math.max(...values));
+    return { kind: "number", value: Math.max(...values) };
   }
 
   const sortedValues = [...values].sort((left, right) => left - right);
   const middle = Math.floor(sortedValues.length / 2);
 
-  return sortedValues.length % 2 === 0
-    ? String((sortedValues[middle - 1] + sortedValues[middle]) / 2)
-    : String(sortedValues[middle]);
+  return {
+    kind: "number",
+    value: sortedValues.length % 2 === 0
+      ? (sortedValues[middle - 1] + sortedValues[middle]) / 2
+      : sortedValues[middle]
+  };
+}
+
+function recalculateStructuredTableFormulas(table: StructuredTable): StructuredTable {
+  const normalizedTable = normalizeStructuredTable(table);
+  const cache = new Map<string, StructuredTableNumericResult>();
+
+  return {
+    ...normalizedTable,
+    rows: normalizedTable.rows.map((row, rowIndex) => row.map((cell, columnIndex) => {
+      if (!cell.formula) {
+        return cell;
+      }
+
+      const result = resolveStructuredTableNumericCell(
+        normalizedTable,
+        rowIndex,
+        columnIndex,
+        new Set<string>(),
+        cache
+      );
+      const text = result.kind === "number"
+        ? String(result.value)
+        : result.kind === "error" && result.code === "CYCLE"
+          ? "#CYCLE!"
+          : "#VALUE!";
+
+      return {
+        ...cell,
+        text,
+        styles: []
+      };
+    }))
+  };
+}
+
+function syncStructuredTableFormulaDisplays(table: StructuredTable) {
+  table.rows.forEach((row, rowIndex) => {
+    row.forEach((cell, columnIndex) => {
+      if (!cell.formula) {
+        return;
+      }
+
+      const editor = document.querySelector<HTMLElement>(getStructuredTableCellSelector({
+        tableId: table.id,
+        rowIndex,
+        columnIndex
+      }));
+      if (!editor) {
+        return;
+      }
+
+      editor.dataset.formula = cell.formula;
+      editor.dataset.computedValue = cell.text;
+      if (document.activeElement !== editor) {
+        editor.textContent = cell.text;
+      }
+    });
+  });
 }
 
 function normalizeStructuredTable(table: StructuredTable): StructuredTable {
@@ -2541,7 +2992,7 @@ function normalizeStructuredTable(table: StructuredTable): StructuredTable {
 }
 
 function normalizeStructuredTables(tables: StructuredTable[]) {
-  return tables.map(normalizeStructuredTable);
+  return tables.map(recalculateStructuredTableFormulas);
 }
 
 function evaluateTableFormula(table: TableBlock, formula: NonNullable<ReturnType<typeof parseTableFormula>>) {
@@ -3041,6 +3492,8 @@ function Editor() {
   const [showCommands, setShowCommands] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [tableFormulaMenu, setTableFormulaMenu] = useState<StructuredTableFormulaMenuState | null>(null);
+  const [selectedTableFormulaIndex, setSelectedTableFormulaIndex] = useState(0);
   const [commandFeedback, setCommandFeedback] = useState<CommandFeedback | null>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number; placement: "below" | "above" }>({
     top: 0,
@@ -3079,6 +3532,9 @@ function Editor() {
   const visibleCommands = useMemo(() => {
     return getCommandSuggestions(commandQuery);
   }, [commandQuery]);
+  const visibleTableFormulas = useMemo(() => (
+    getTableFormulaSuggestions(tableFormulaMenu?.query ?? "")
+  ), [tableFormulaMenu?.query]);
 
   useEffect(() => {
     if (!commandFeedback) {
@@ -3326,7 +3782,7 @@ function Editor() {
         };
       }
 
-      return {
+      return recalculateStructuredTableFormulas({
         ...table,
         rows: table.rows.map((row, currentRowIndex) => (
           currentRowIndex === rowIndex
@@ -3335,25 +3791,54 @@ function Editor() {
               ))
             : row
         ))
-      };
+      });
     }));
 
     structuredTablesRef.current = nextTables;
     setStructuredTables(nextTables);
+    const updatedTable = nextTables.find((table) => table.id === tableId);
+    if (updatedTable) {
+      requestAnimationFrame(() => syncStructuredTableFormulaDisplays(updatedTable));
+    }
   }, []);
 
-  const moveStructuredTableCell = useCallback((target: StructuredTableCellTarget) => {
+  const insertStructuredTableFormulaTemplate = useCallback((
+    target: StructuredTableCellTarget,
+    commandName: string
+  ) => {
+    const editor = document.querySelector<HTMLElement>(getStructuredTableCellSelector(target));
+    const template = `//${commandName}()`;
+
+    if (!editor) {
+      return;
+    }
+
+    editor.textContent = template;
+    delete editor.dataset.formula;
+    delete editor.dataset.computedValue;
+    updateStructuredCell(target.tableId, target.rowIndex, target.columnIndex, (cell) => ({
+      text: template,
+      activeStyle: cell.activeStyle,
+      styles: []
+    }));
+    setTableFormulaMenu(null);
+    setSelectedTableFormulaIndex(0);
+    editor.focus();
+    placeCaretAtTextOffset(editor, template.length - 1);
+  }, [updateStructuredCell]);
+
+  const moveStructuredTableCell = useCallback((target: StructuredTableCellTarget, message?: string) => {
     activeStructuredCellRef.current = target;
     structuredTableModeRef.current = "editing";
     structuredTableSelectionModeRef.current = "cell";
-    scheduleStructuredCellFocus(target);
+    scheduleStructuredCellFocus(target, message);
   }, []);
 
-  const navigateStructuredTableCell = useCallback((target: StructuredTableCellTarget) => {
+  const navigateStructuredTableCell = useCallback((target: StructuredTableCellTarget, message?: string) => {
     activeStructuredCellRef.current = target;
     structuredTableModeRef.current = "navigating";
     structuredTableSelectionModeRef.current = "cell";
-    scheduleStructuredCellNavigation(target, "cell");
+    scheduleStructuredCellNavigation(target, "cell", message);
   }, []);
 
   const selectStructuredTableRange = useCallback((
@@ -3397,15 +3882,19 @@ function Editor() {
     structuredTablesRef.current = nextTables;
     setStructuredTables(nextTables);
     setTableRenderRevision((revision) => revision + 1);
+    const updatedTable = nextTables.find((table) => table.id === tableId);
     const target = {
       tableId,
       rowIndex: Math.max(0, rowIndex),
       columnIndex: afterColumnIndex + 1
     };
+    const message = updatedTable
+      ? `Column ${getStructuredTableColumnLabel(target.columnIndex)} inserted. Table now has ${updatedTable.columns.length} columns.`
+      : undefined;
     if (nextMode === "navigating") {
-      navigateStructuredTableCell(target);
+      navigateStructuredTableCell(target, message);
     } else {
-      moveStructuredTableCell(target);
+      moveStructuredTableCell(target, message);
     }
   }, [moveStructuredTableCell, navigateStructuredTableCell]);
 
@@ -3440,10 +3929,14 @@ function Editor() {
     setStructuredTables(nextTables);
     setTableRenderRevision((revision) => revision + 1);
     const target = { tableId, rowIndex: nextRowIndex, columnIndex };
+    const updatedTable = nextTables.find((table) => table.id === tableId);
+    const message = updatedTable
+      ? `Row ${nextRowIndex + 1} inserted. Table now has ${updatedTable.rows.length} rows.`
+      : undefined;
     if (nextMode === "navigating") {
-      navigateStructuredTableCell(target);
+      navigateStructuredTableCell(target, message);
     } else {
-      moveStructuredTableCell(target);
+      moveStructuredTableCell(target, message);
     }
   }, [moveStructuredTableCell, navigateStructuredTableCell]);
 
@@ -3456,6 +3949,10 @@ function Editor() {
 
     if (!table || table.rows.length <= 1) {
       setFileStatus("A table must keep at least one row.");
+      const wrapper = document.querySelector<HTMLElement>(`.structured-table-widget[data-table-id="${tableId}"]`);
+      if (wrapper) {
+        announceStructuredTable(wrapper, "Row not deleted. A table must keep at least one row.");
+      }
       return;
     }
 
@@ -3472,7 +3969,10 @@ function Editor() {
     structuredTablesRef.current = nextTables;
     setStructuredTables(nextTables);
     setTableRenderRevision((revision) => revision + 1);
-    navigateStructuredTableCell({ tableId, rowIndex: nextRowIndex, columnIndex });
+    navigateStructuredTableCell(
+      { tableId, rowIndex: nextRowIndex, columnIndex },
+      `Row ${rowIndex + 1} deleted. Table now has ${table.rows.length - 1} rows.`
+    );
   }, [navigateStructuredTableCell]);
 
   const deleteStructuredTableColumn = useCallback((
@@ -3484,6 +3984,10 @@ function Editor() {
 
     if (!table || table.columns.length <= 1) {
       setFileStatus("A table must keep at least one column.");
+      const wrapper = document.querySelector<HTMLElement>(`.structured-table-widget[data-table-id="${tableId}"]`);
+      if (wrapper) {
+        announceStructuredTable(wrapper, "Column not deleted. A table must keep at least one column.");
+      }
       return;
     }
 
@@ -3507,7 +4011,7 @@ function Editor() {
       tableId,
       rowIndex: Math.max(0, rowIndex),
       columnIndex: nextColumnIndex
-    });
+    }, `Column ${getStructuredTableColumnLabel(columnIndex)} deleted. Table now has ${table.columns.length - 1} columns.`);
   }, [navigateStructuredTableCell]);
 
   const deleteSelectedStructuredTable = useCallback((view: EditorView) => {
@@ -3593,16 +4097,21 @@ function Editor() {
 
       updateStructuredCell(tableId, rowIndex, columnIndex, (cell) => {
         const commandFrom = Math.max(0, cell.text.length - commandLength);
+        const range = commandArgument.replace(/^\(|\)$/g, "").toUpperCase();
 
         return {
           text: `${cell.text.slice(0, commandFrom).trimEnd()}${result}`,
+          formula: `//${formula.operation}(${range})`,
           activeStyle: cell.activeStyle,
           styles: []
         };
       });
       setTableRenderRevision((revision) => revision + 1);
-      moveStructuredTableCell({ tableId, rowIndex, columnIndex });
-      setFileStatus("Table formula calculated.");
+      navigateStructuredTableCell(
+        { tableId, rowIndex, columnIndex },
+        `Formula result ${result}.`
+      );
+      setFileStatus("Live table formula saved.");
       setFileStatusKind("success");
       return;
     }
@@ -3646,7 +4155,7 @@ function Editor() {
     moveStructuredTableCell({ tableId, rowIndex, columnIndex });
     setFileStatus(`Applied //${commandName} in table cell.`);
     setFileStatusKind("success");
-  }, [getCellStyleForCommand, moveStructuredTableCell, updateStructuredCell]);
+  }, [getCellStyleForCommand, moveStructuredTableCell, navigateStructuredTableCell, updateStructuredCell]);
 
   const runFileCommand = useCallback(async (
     commandName: "save" | "new" | "export",
@@ -4833,7 +5342,11 @@ function Editor() {
 
   useEffect(() => {
     const handleCellInput = (event: Event) => {
-      const detail = (event as CustomEvent).detail as StructuredTableCellTarget & { text: string };
+      const detail = (event as CustomEvent).detail as StructuredTableCellTarget & {
+        text: string;
+        formulaMenuQuery: string | null;
+        menuCoords: { top: number; bottom: number; left: number };
+      };
 
       updateStructuredCell(detail.tableId, detail.rowIndex, detail.columnIndex, (cell) => ({
         text: detail.text,
@@ -4852,12 +5365,69 @@ function Editor() {
               }))
               .filter((range) => range.from < range.to)
       }));
+
+      if (detail.formulaMenuQuery !== null) {
+        const suggestionCount = getTableFormulaSuggestions(detail.formulaMenuQuery).length;
+        const position = getCommandMenuPosition(detail.menuCoords, suggestionCount);
+        setTableFormulaMenu({
+          target: {
+            tableId: detail.tableId,
+            rowIndex: detail.rowIndex,
+            columnIndex: detail.columnIndex
+          },
+          query: detail.formulaMenuQuery,
+          ...position
+        });
+        setSelectedTableFormulaIndex(0);
+      } else {
+        setTableFormulaMenu(null);
+        setSelectedTableFormulaIndex(0);
+      }
     };
 
     const handleCellFocus = (event: Event) => {
       const detail = (event as CustomEvent).detail as StructuredTableCellTarget;
       activeStructuredCellRef.current = detail;
       structuredTableModeRef.current = "editing";
+      setTableFormulaMenu((currentMenu) => (
+        currentMenu && (
+          currentMenu.target.tableId !== detail.tableId ||
+          currentMenu.target.rowIndex !== detail.rowIndex ||
+          currentMenu.target.columnIndex !== detail.columnIndex
+        ) ? null : currentMenu
+      ));
+    };
+
+    const handleFormulaMenuKey = (event: Event) => {
+      const detail = (event as CustomEvent).detail as StructuredTableCellTarget & { key: string };
+
+      if (!tableFormulaMenu) {
+        return;
+      }
+
+      if (detail.key === "Escape") {
+        setTableFormulaMenu(null);
+        setSelectedTableFormulaIndex(0);
+        return;
+      }
+      if (detail.key === "ArrowDown" && visibleTableFormulas.length > 0) {
+        setSelectedTableFormulaIndex((currentIndex) => (
+          (currentIndex + 1) % visibleTableFormulas.length
+        ));
+        return;
+      }
+      if (detail.key === "ArrowUp" && visibleTableFormulas.length > 0) {
+        setSelectedTableFormulaIndex((currentIndex) => (
+          (currentIndex - 1 + visibleTableFormulas.length) % visibleTableFormulas.length
+        ));
+        return;
+      }
+      if (detail.key === "Enter") {
+        const command = visibleTableFormulas[selectedTableFormulaIndex];
+        if (command) {
+          insertStructuredTableFormulaTemplate(tableFormulaMenu.target, command.name);
+        }
+      }
     };
 
     const handleCellKey = (event: Event) => {
@@ -4933,16 +5503,22 @@ function Editor() {
     document.addEventListener(TABLE_WIDGET_INPUT_EVENT, handleCellInput);
     document.addEventListener(TABLE_WIDGET_FOCUS_EVENT, handleCellFocus);
     document.addEventListener(TABLE_WIDGET_KEY_EVENT, handleCellKey);
+    document.addEventListener(TABLE_WIDGET_FORMULA_MENU_KEY_EVENT, handleFormulaMenuKey);
     return () => {
       document.removeEventListener(TABLE_WIDGET_INPUT_EVENT, handleCellInput);
       document.removeEventListener(TABLE_WIDGET_FOCUS_EVENT, handleCellFocus);
       document.removeEventListener(TABLE_WIDGET_KEY_EVENT, handleCellKey);
+      document.removeEventListener(TABLE_WIDGET_FORMULA_MENU_KEY_EVENT, handleFormulaMenuKey);
     };
   }, [
     addStructuredTableColumn,
     addStructuredTableRow,
+    insertStructuredTableFormulaTemplate,
     moveStructuredTableCell,
     runStructuredTableCellCommand,
+    selectedTableFormulaIndex,
+    tableFormulaMenu,
+    visibleTableFormulas,
     updateStructuredCell
   ]);
 
@@ -5372,6 +5948,41 @@ function Editor() {
                 )) : (
                   <div className="command-menu-empty">
                     No commands match //{commandQuery}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tableFormulaMenu && (
+              <div
+                className={`command-menu table-formula-menu ${tableFormulaMenu.placement}`}
+                role="listbox"
+                aria-label="Table formulas"
+                style={{
+                  top: tableFormulaMenu.top,
+                  left: tableFormulaMenu.left
+                }}
+              >
+                {visibleTableFormulas.length > 0 ? visibleTableFormulas.map((command, index) => (
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={index === selectedTableFormulaIndex}
+                    className={`command-menu-item ${index === selectedTableFormulaIndex ? "selected" : ""}`}
+                    key={command.name}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setSelectedTableFormulaIndex(index)}
+                    onClick={() => insertStructuredTableFormulaTemplate(
+                      tableFormulaMenu.target,
+                      command.name
+                    )}
+                  >
+                    <code>//{command.name}()</code>
+                    <span>{command.description} · {command.signature}</span>
+                  </button>
+                )) : (
+                  <div className="command-menu-empty">
+                    No table formulas match //{tableFormulaMenu.query}
                   </div>
                 )}
               </div>

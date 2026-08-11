@@ -10,12 +10,28 @@ export interface CommandActionContext {
   setUnderline: (enabled: boolean) => void;
 }
 
-interface Command {
+export interface Command {
   name: string;
   description: string;
   arguments?: string[];
   action: (context: CommandActionContext, argument?: string) => boolean;
 }
+
+export interface TableFormulaCommand {
+  name: string;
+  description: string;
+  signature: string;
+}
+
+export const TableFormulaRegistry: TableFormulaCommand[] = [
+  { name: "sum", description: "Add numeric cells", signature: "SUM(A1:A3)" },
+  { name: "avg", description: "Average numeric cells", signature: "AVG(A1:A3)" },
+  { name: "mean", description: "Average numeric cells", signature: "MEAN(A1:A3)" },
+  { name: "median", description: "Find the middle value", signature: "MEDIAN(A1:A3)" },
+  { name: "min", description: "Find the smallest value", signature: "MIN(A1:A3)" },
+  { name: "max", description: "Find the largest value", signature: "MAX(A1:A3)" },
+  { name: "count", description: "Count numeric cells", signature: "COUNT(A1:A3)" }
+];
 
 export const TEXT_COLOR_OPTIONS = [
   { name: "red", label: "Red", value: "#ff8f9b" },
