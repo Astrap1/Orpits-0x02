@@ -636,9 +636,11 @@ We observed whether typing remained usable, whether the command menu appeared wi
 
 ## User Testing
 
+### Round 1 — Exploratory Testing
+
 We conducted the first round of user testing with five participants. Each participant received the user guide linked above so they could learn the intended keyboard-first workflow before trying the application. Their feedback was then used to identify areas where the interface could better support different note-taking needs.
 
-### Participant Profiles
+#### Participant Profiles
 
 Participants are identified anonymously as `P1` to `P5`.
 
@@ -652,24 +654,86 @@ Participants are identified anonymously as `P1` to `P5`.
 
 The participant group provided perspectives from frequent note-takers, writers, and coders across both technical and non-technical fields. However, all five participants were students, so the findings may not represent the needs of working professionals or other user groups. Future testing should include participants from a wider range of backgrounds.
 
-### Finding: Default Table Size
+#### Finding: Default Table Size
 
 The original table design created a 3×3 table by default. Some participants found this unnecessarily large because they only needed a smaller table, such as 2×2, for simple notes and comparisons.
 
 Based on this feedback, we changed `//table` to create a 1×1 table. Users can then expand it only when needed: `Tab` adds or moves across columns, while `Enter` adds or moves across rows. This makes the default table less intrusive without limiting users who need larger tables.
 
-### Finding: Command Length
+#### Finding: Command Length
 
 Some participants found longer commands inconvenient to type, particularly when they could not remember the exact command name. Commands such as `//bulletlist` and `//wordcount` are descriptive, but entering the full name can interrupt the typing flow that x2pad is intended to preserve.
 
 This feedback led to the implementation of fuzzy command search. The command menu now uses Fuse.js together with prefix and ordered-letter matching. For example, a user who types `//blt` can still be shown `//bulletlist`, while `//wrd` can suggest `//wordcount`. This reduces the amount of typing required and makes longer commands easier to discover without replacing the existing command names.
 
-### Follow-up Areas
+### Round 2 — Usability Survey
 
-The following areas are not recorded as findings from this round and will be evaluated in future testing:
+In the second round of user testing, 10 users tested the updated application and completed a usability survey. Participants assessed the app's ease of use, overall interface design, overall satisfaction, and how likely they would be to use the app again. Each question used a five-point rating scale, where 1 represented the most negative response and 5 represented the most positive response.
 
-- Whether users can discover commands and table keyboard controls without repeatedly referring to the user guide
-- Whether the `Ctrl+Enter` code-box instruction, execution status, and Python error messages are clear to first-time users
+#### Participant Profiles
 
-# Note
-For the current state of our app, only the Windows version is available. However, for our final product, we would like to create a Mac version as well.
+Participants are identified anonymously as `P1` to `P10`.
+
+| Participant | Field of study | Relevant experience |
+|---|---|---|
+| P1 | Biomedical Engineering | Frequent note-taker |
+| P2 | Computer Engineering | Frequent note-taker and coder |
+| P3 | Business Analytics | Frequent note-taker and coder |
+| P4 | History | Frequent writer |
+| P5 | Data Science | Frequent note-taker |
+| P6 | Law | Frequent writer |
+| P7 | Computer Science | Frequent coder |
+| P8 | Electrical Engineering | Frequent note-taker and coder |
+| P9 | Geography | Frequent note-taker |
+| P10 | Business | Frequent note-taker |
+
+#### Survey Results
+
+| Measure | Average rating | Ratings of 4–5 | Ratings of 1–2 |
+|---|---:|---:|---:|
+| Ease of use | 4.2/5 | 90% | 0% |
+| Interface design | 4.2/5 | 90% | 0% |
+| Overall satisfaction | 4.3/5 | 90% | 0% |
+| Likelihood of using the app again | 4.2/5 | 80% | 0% |
+
+#### Ease of Use
+
+![Survey results for ease of use](project-docs/survey/easy.png)
+
+#### Interface Design
+
+![Survey results for the overall interface design](project-docs/survey/design.png)
+
+#### Overall Satisfaction
+
+![Survey results for overall satisfaction](project-docs/survey/satisfaction.png)
+
+#### Likelihood of Using the App Again
+
+![Survey results for likelihood of using the app again](project-docs/survey/use%20again.png)
+
+#### Feature Feedback and Changes
+
+##### Table Navigation Guidance
+
+Some participants were unsure which keyboard commands they could use to navigate and edit a table. In response, we added a contextual shortcut guide beneath the active table. The guide displays the relevant commands for the user's current mode, including moving between cells, adding rows or columns, selecting a row or column, deleting a selection, and returning to the document. This keeps the keyboard controls visible while users work without adding permanent controls to the interface.
+
+##### Table Row and Column Labels
+
+Participants also requested clearer labels for table rows and columns so that individual cells would be easier to identify. We added spreadsheet-style column letters and row numbers that become visible when the user enters a table. These labels make the table structure clearer and help users understand cell references used in formulas such as `//sum(A1:A3)`.
+
+##### Python and C++ Setup
+
+Some participants were unsure how to install the Python interpreter or C++ compiler required to run code boxes. To simplify setup on Windows, we created a script. Users can run this script to check for the required tools and automatically install Python and the supported C++ toolchain through Windows Package Manager when they are missing. The script also verifies the installation and provides guidance if setup cannot be completed automatically.
+
+##### Automatic Saving
+
+Participants found it troublesome to repeatedly type `//save` while editing their notes. In response, we added automatic saving for notes that already have a file location. After the user makes a change, x2pad waits briefly and then saves the latest note content, formatting, tables, and code boxes to the existing `.x2` file. The editor displays whether an automatic save is pending, completed, or unsuccessful so that users can confirm the state of their work. The `//save` command remains available for the initial save and whenever the user wants to save manually.
+
+#### Interpretation of Results
+
+The survey results indicate that participants generally had a positive experience with the updated application. Ease of use and interface design both received an average rating of 4.2 out of 5, with 90% of participants selecting either 4 or 5. This suggests that most participants found the application approachable and responded positively to its visual design.
+
+Overall satisfaction received the highest average rating at 4.3 out of 5. Nine of the 10 participants rated their satisfaction at 4 or 5, indicating that the application met the expectations of most participants in this testing round.
+
+The likelihood of using the app again also received an average rating of 4.2 out of 5. However, this measure had two ratings of 3, compared with one rating of 3 for each of the other measures. Although 80% of participants still gave a positive rating of 4 or 5, the result suggests that repeat-use value has slightly more room for improvement than ease of use, interface design, or overall satisfaction.
