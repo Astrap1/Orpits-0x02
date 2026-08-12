@@ -24,15 +24,15 @@ Ultimately, it provides a mouse-optional core editing workflow that reduces the 
 
 # User Stories
 1. The Focused Student
-- As a student taking fast-paced lecture notes, I want to create complex tables using only Tab and Enter so that I can structure information without interrupting my typing flow.
+   - As a student taking fast-paced lecture notes, I want to create complex tables using only Tab and Enter so that I can structure information without interrupting my typing flow.
 2. The Agile Developer
-- As a coder brainstorming logic, I want to type `//code` to insert a code box, run the snippet with `Ctrl+Enter`, and see the output in my notes so that I can verify my ideas immediately.
+   - As a coder brainstorming logic, I want to type `//code` to insert a code box, run the snippet with `Ctrl+Enter`, and see the output in my notes so that I can verify my ideas immediately.
 3. The Academic Writer
-- As an essay writer, I want to type `\\prompt` to get instant AI feedback or expansion without leaving my editor.
+   - As an essay writer, I want to type `\\prompt` to get instant AI feedback or expansion without leaving my editor.
 4. The Privacy Conscious User
-- As a user handling sensitive data, I want my notes saved locally in the `.x2` format so that I have complete ownership over my files without relying on cloud storage.
+   - As a user handling sensitive data, I want my notes saved locally in the `.x2` format so that I have complete ownership over my files without relying on cloud storage.
 5. The UI/UX Enthusiast
-- As a user who values aesthetics, I want a minimalist workspace with clean typography, rounded edges, and translucent sidebars so that the editor feels modern and unobtrusive.
+   - As a user who values aesthetics, I want a minimalist workspace with clean typography, rounded edges, and translucent sidebars so that the editor feels modern and unobtrusive.
 
 # Features
 ## 1. The Notepad
@@ -94,7 +94,7 @@ In the table layer, tapping `Shift` cycles the selection from the current cell, 
 
 While a table is active, a compact shortcut guide appears beneath it. The guide changes with the current document, cell-navigation, cell-editing, row-selection, or column-selection mode, so the relevant actions remain visible without adding permanent buttons or interrupting keyboard-first editing. Tables expose grid, row, column-header, row-header, and cell semantics to assistive technologies; only the active cell participates in the keyboard focus order, and navigation, selection, insertion, deletion, and minimum-size errors are announced through a live region. The guide is part of the editor interface only and is not saved in the note or included in PDF exports.
 
-Tables also support live calculations over spreadsheet-style cell ranges. Typing `//` in a data cell opens a table-specific formula registry; the arrow keys select a formula and `Enter` inserts a template with the cursor inside its parentheses. For example, completing `//sum(A1:A3)` stores both the formula and its displayed result. If a referenced number or formula result changes, dependent formula cells recalculate immediately. Selecting a formula cell for editing reveals its formula again. The supported operations are `sum`, `avg`, `mean`, `median`, `min`, `max`, and `count`; circular references display `#CYCLE!` and invalid ranges display `#VALUE!`.
+Tables also support live calculations over spreadsheet-style cell ranges. Typing `//` in a data cell opens a table-specific formula registry; the arrow keys select a formula and `Enter` inserts a template with the cursor inside its parentheses. For example, completing `//sum(A1:A3)` stores both the formula and its displayed result. If a referenced number or formula result changes, dependent formula cells recalculate immediately. Selecting a formula cell for editing reveals its formula again. The supported operations are `sum`, `avg`, `mean`, `min`, `max`, and `count`; circular references display `#CYCLE!` and invalid ranges display `#VALUE!`.
 
 ## 6. Fuzzy Search
 Fuzzy search improves the discoverability of commands. Since x2pad depends heavily on typed commands, users do not need to memorise every command exactly. The command menu accepts partial or imperfect command names and still returns useful suggestions.
@@ -533,17 +533,22 @@ We developed the first usable version of the `\\` AI registry using the Gemini A
 
 In the third milestone, we added executable Python code boxes through `//code`. Code boxes support Python syntax highlighting, keyboard navigation, `Ctrl+Enter` execution, and an output panel for results and errors. Python source is sent to the Tauri/Rust backend and executed using a locally installed interpreter.
 
-We also implemented structured tables through `//table`, including keyboard-based cell navigation, automatic row and column creation, row and column deletion, and formulas such as `sum`, `avg`, `mean`, `median`, `min`, `max`, and `count`. Formula discovery now uses its own keyboard-operated registry, and formulas persist and recalculate when referenced values change. Version 2 of the `.x2` format added structured-table persistence while retaining compatibility with earlier notes.
+We also implemented structured tables through `//table`, including keyboard-based cell navigation, automatic row and column creation, row and column deletion, and formulas such as `sum`, `avg`, `mean`, `min`, `max`, and `count`. Formula discovery now uses its own keyboard-operated registry, and formulas persist and recalculate when referenced values change. Version 2 of the `.x2` format added structured-table persistence while retaining compatibility with earlier notes.
 
 Finally, five participants completed the first round of user testing. Their feedback led us to change the default table from 3×3 to 1×1 and highlighted the need for fuzzy command search to make longer commands easier to discover and enter.
 
 # Splashdown Objectives
-Finally, our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
-
-C++ execution, language preselection, fuzzy command search, structured-table PDF wrapping, visual code-box PDF export, contextual table shortcut guidance, planned structured-table accessibility improvements, and live discoverable table formulas have now been completed. Users can create Python or C++ code boxes explicitly while the original `//code` command remains compatible with Python. The command menu now uses Fuse.js alongside prefix and ordered-letter matching so that partial or imperfect command names can return useful suggestions. Exported tables use dynamic row heights, preserve wrapped and explicit lines, keep rows intact across page breaks, and repeat their headers on new pages. Exported code boxes reproduce the editor's language header, dark source panel, monospace content, run status, and visible standard or error output. Active tables now display a compact guide that adapts to document, cell, row, column, and editing modes without adding persistent toolbar controls. Accessible grid semantics, labelled cell coordinates, roving focus, selection state, live announcements, and high-contrast selection outlines support keyboard and screen-reader use without introducing horizontal mouse-driven controls. A table-specific `//` registry now exposes the available calculations, while persisted formulas update automatically when referenced values or formula results change.
+Our main objective is to refine the code-box and table features into more complete document components, improve how they appear in exported files, and explore a more accessible way for users to access the AI feature.
 
 The objectives are:
 
+- Improve structured-table accessibility, cell layout, and handling of larger tables
+- Add clearer visible controls for managing table rows and columns while preserving keyboard-first navigation and formulas
+- Implement fuzzy command search with Fuse.js so partial or imperfect command names can return useful suggestions
+- Add C++ execution to the code box
+- Allow users to select or identify the programming language used by each code box
+- Refine structured-table PDF export with better cell wrapping and page-break handling
+- Improve PDF export so that code boxes preserve code formatting and clearly display their output
 - Continue user testing and use the findings to refine table editing, code-box interaction, and export quality
 - Investigate a managed AI access system so that users do not need to obtain and configure their own Gemini API key
 - Design usage tracking, quotas, secure API-key handling, and cost controls for the managed AI system before making it available to users
@@ -574,7 +579,7 @@ The following results were verified on 11 August 2026:
 |---|---|---|
 | `npm run build` | Compiles TypeScript and creates the production Vite frontend build | Passed |
 | `npm run test:all` | Runs the production build, frontend stress suite, Rust formatting check, and Rust tests | Passed |
-| `npm run test:stress` | Checks command actions and arguments, table-formula registry matching, live and chained table formulas, formula errors, contextual shortcut guidance and accessible cell announcements, table/code-box delete-undo-redo behaviour, Python/C++ code-block parsing, AI-response parsing, style ranges, paths, and frontend utility logic | 2,188 assertions passed |
+| `npm run test:stress` | Checks command actions and arguments, table-formula registry matching, live and chained table formulas, formula errors, contextual shortcut guidance and accessible cell announcements, table/code-box delete-undo-redo behaviour, Python/C++ code-block parsing, AI-response parsing, style ranges, paths, and frontend utility logic | 2,190 assertions passed |
 | `cd src-tauri && cargo test` | Checks `.x2` validation and compatibility, structured-table persistence, folder loading, PDF helpers, text spacing, multi-line table and code-box export, Python execution limits, and C++ compilation and error reporting | 15 tests passed |
 
 The stress-test script performs deterministic logic checks; it does not simulate real typing speed or measure visual interface responsiveness.
@@ -737,3 +742,9 @@ The survey results indicate that participants generally had a positive experienc
 Overall satisfaction received the highest average rating at 4.3 out of 5. Nine of the 10 participants rated their satisfaction at 4 or 5, indicating that the application met the expectations of most participants in this testing round.
 
 The likelihood of using the app again also received an average rating of 4.2 out of 5. However, this measure had two ratings of 3, compared with one rating of 3 for each of the other measures. Although 80% of participants still gave a positive rating of 4 or 5, the result suggests that repeat-use value has slightly more room for improvement than ease of use, interface design, or overall satisfaction.
+
+# Conclusion
+
+x2pad demonstrates that a keyboard-first note-taking application can combine document editing, structured tables, executable code boxes, and contextual AI assistance within a single workflow. Two rounds of user testing produced generally positive results and helped guide improvements such as fuzzy command search, clearer table navigation, automatic saving, and easier code-execution setup.
+
+The project now provides a functional local-first editor while leaving room for further refinement. Future work will focus on investigating a secure and sustainable managed AI-access system.
