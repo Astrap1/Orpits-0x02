@@ -551,12 +551,17 @@ The objectives are:
 The managed AI access system is an exploratory objective because it would require additional backend infrastructure and careful handling of security, privacy, abuse prevention, and API costs. The initial goal is to evaluate and prototype a safe approach rather than immediately replacing the current user-provided API-key system.
 
 # Challenges Faced
-1. Balancing keyboard-first design with discoverability
-- A command-based editor is fast for experienced users, but new users still need clear suggestions so they do not have to memorise every command.
-2. Managing editor state correctly
-- Formatting commands need to affect newly typed text without unexpectedly changing existing text. This requires careful handling of editor state, cursor position, and text decorations.
-3. Avoiding conflicts between normal typing and commands
-- Since commands are typed directly into the document, the editor must distinguish between normal text and intentional commands like `//bold` or `//code`.
+- Balancing keyboard-first design with discoverability: Typed commands are fast for experienced users, but new users still need filtered suggestions and clear feedback so they do not have to memorise every command.
+- Managing CodeMirror state while keeping React state in sync: The app has to coordinate document text, cursor position, decorations, selected widgets, table data, code-box output, sidebar state, and AI state without causing unnecessary re-renders or stale UI.
+- Avoiding conflicts between normal typing and commands: The editor must distinguish between ordinary text and intentional commands like `//bold`, `//table`, `//code`, and `\\prompt`, especially inside code boxes and table cells.
+- Preserving formatting across editing, saving, loading, and exporting: Formatting ranges need to survive text edits, `.x2` serialisation, reopening, and PDF conversion without shifting onto the wrong characters.
+- Designing a backward-compatible `.x2` format: The file format had to support newer structured data such as tables while still allowing older version 1 notes to load correctly.
+- Making structured tables editable without exposing internal anchors: Tables are represented by hidden document anchors and separate JSON table data, so deletion, undo, redo, selection, and PDF export had to avoid leaking raw anchor text to the user.
+- Running local Python and C++ safely: Code execution needs timeouts, output limits, compiler/interpreter detection, and clear error messages so bad snippets or missing tools do not freeze or crash the app.
+- Supporting different user environments: Testers may have different Python launchers, missing C++ compilers, slow interpreter startup, or older installed app builds, so the app needs helpful setup instructions and fallback behaviour.
+- Generating PDFs that match the editor closely: Export has to translate editor-specific state, rich text ranges, code boxes, and structured tables into a separate PDF layout with readable formatting.
+- Keeping AI API keys local and optional: Gemini prompting should not expose keys in source code, and missing or invalid keys should produce visible warnings instead of blocking normal note-taking.
+- Avoiding UI layout issues across window sizes: Scrollbars, command popups, sidebars, tables, and editor content need to remain usable and aligned on different desktop window sizes.
 
 # Testing and Validation
 
