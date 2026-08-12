@@ -179,6 +179,40 @@ function loadEditorSupport() {
   return context.__editorSupport;
 }
 
+function testStructuredTableAutosaveWiring() {
+  const source = fs.readFileSync(new URL("../src/pages/Editor.tsx", import.meta.url), "utf8");
+  const sourceFile = ts.createSourceFile(
+    "Editor.tsx",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX
+  );
+  let updateStructuredCellSource = "";
+
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "updateStructuredCell") {
+      updateStructuredCellSource = node.initializer?.getText(sourceFile) ?? "";
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  checkMatches(
+    updateStructuredCellSource,
+    /pendingOpenedContentRef\.current\s*=\s*null/,
+    "Cell edits should clear the note-load autosave suppression marker"
+  );
+  checkMatches(
+    updateStructuredCellSource,
+    /setTableRenderRevision\s*\(\s*\(revision\)\s*=>\s*revision\s*\+\s*1\s*\)/,
+    "Cell edits should advance the revision observed by table autosave"
+  );
+}
+
 function makeCommandContext(documentText = "") {
   const state = {
     inserted: [],
@@ -622,4 +656,5 @@ const commandSearch = loadCommandSearch(registry);
 const editor = loadEditorSupport();
 testCommands(registry, commandSearch);
 testEditorLogic(editor);
+testStructuredTableAutosaveWiring();
 console.log(`Frontend logic stress test passed: ${checks} assertions.`);

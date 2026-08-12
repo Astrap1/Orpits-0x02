@@ -7,7 +7,7 @@ import { pythonLanguage } from "@codemirror/lang-python";
 import { indentWithTab, invertedEffects } from "@codemirror/commands";
 import { ChangeSet, EditorState, Prec, RangeSetBuilder, StateEffect, StateField, Text } from "@codemirror/state";
 import type { TransactionSpec } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView, keymap, WidgetType } from "@codemirror/view";
+import { Decoration, DecorationSet, EditorView, keymap, scrollPastEnd, WidgetType } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -208,6 +208,21 @@ const TABLE_WIDGET_INPUT_EVENT = "x2pad-table-cell-input";
 const TABLE_WIDGET_KEY_EVENT = "x2pad-table-cell-key";
 const TABLE_WIDGET_FOCUS_EVENT = "x2pad-table-cell-focus";
 const TABLE_WIDGET_FORMULA_MENU_KEY_EVENT = "x2pad-table-formula-menu-key";
+const AUTO_SAVE_DELAY_MS = 3000;
+const editorCursorScrollMargin = EditorView.scrollMargins.of(() => ({ bottom: 48 }));
+
+const keepEditorCursorInView = EditorState.transactionExtender.of((transaction) => (
+  transaction.selection
+    ? {
+        effects: EditorView.scrollIntoView(transaction.newSelection.main.head, {
+          y: "nearest",
+          x: "nearest",
+          yMargin: 8,
+          xMargin: 12
+        })
+      }
+    : null
+));
 
 const getResolvedColor = (color: string) => colorValues[color] ?? color;
 
@@ -451,6 +466,7 @@ function scheduleStructuredCellFocus(target: StructuredTableCellTarget, message?
       }
       element.focus();
       placeCaretAtEnd(element);
+      element.scrollIntoView({ block: "nearest", inline: "nearest" });
       return;
     }
 
@@ -688,6 +704,7 @@ function scheduleStructuredCellNavigation(
         message ?? getStructuredTableSelectionAnnouncement(target, selectionMode)
       );
       wrapper.focus();
+      element.scrollIntoView({ block: "nearest", inline: "nearest" });
       return;
     }
 
@@ -3481,6 +3498,15 @@ function Editor() {
   const structuredTableSelectionModeRef = useRef<StructuredTableSelectionMode>("cell");
   const tableShiftWasUsedRef = useRef(false);
   const structuredTablesRef = useRef<StructuredTable[]>([]);
+  const openedNotesRef = useRef<LoadedX2Note[]>([]);
+  const openedNoteTitleRef = useRef<string | null>(null);
+  const openedNotePathRef = useRef<string | null>(null);
+  const valueRef = useRef("");
+  const autoSaveTimersRef = useRef(new Map<string, number>());
+  const autoSaveVersionsRef = useRef(new Map<string, number>());
+  const noteSaveQueuesRef = useRef(new Map<string, Promise<void>>());
+  const isEditorMountedRef = useRef(true);
+  const pendingOpenedContentRef = useRef<{ pathKey: string; content: string } | null>(null);
 
   const [openedNoteTitle, setOpenedNoteTitle] = useState<string | null>(null);
   const [openedNotePath, setOpenedNotePath] = useState<string | null>(null);
@@ -3511,7 +3537,7 @@ function Editor() {
   const [isSavingApiKey, setIsSavingApiKey] = useState(false);
   const [aiSession, setAiSession] = useState<AiSession | null>(null);
   const [codeRuns, setCodeRuns] = useState<CodeBoxOutput[]>([]);
-  const [structuredTables, setStructuredTables] = useState<StructuredTable[]>([]);
+  const [, setStructuredTables] = useState<StructuredTable[]>([]);
   const [tableRenderRevision, setTableRenderRevision] = useState(0);
 
   const [selectedFont, setSelectedFont] = useState("Body");
@@ -3584,7 +3610,12 @@ function Editor() {
       content: note.content,
       styles: note.styles ?? []
     };
-    setOpenedNoteTitle(note.title || "Untitled Note");
+    const noteTitle = note.title || "Untitled Note";
+    openedNoteTitleRef.current = noteTitle;
+    openedNotePathRef.current = note.path;
+    valueRef.current = note.content;
+    pendingOpenedContentRef.current = { pathKey: getPathKey(note.path), content: note.content };
+    setOpenedNoteTitle(noteTitle);
     setOpenedNotePath(note.path);
     setValue(note.content);
     const loadedTables = normalizeStructuredTables(note.tables ?? []);
@@ -3600,47 +3631,51 @@ function Editor() {
   }, []);
 
   const cacheCurrentOpenedNote = useCallback(() => {
-    if (!openedNotePath) {
-      return;
+    const currentPath = openedNotePathRef.current;
+    if (!currentPath) {
+      return openedNotesRef.current;
     }
 
-    const activePathKey = getPathKey(openedNotePath);
+    const activePathKey = getPathKey(currentPath);
     const currentStyles = styleRangesRef.current.map((range) => ({
       ...range,
       style: { ...range.style }
     }));
 
-    setOpenedNotes((currentNotes) => currentNotes.map((note) => (
+    const nextNotes = openedNotesRef.current.map((note) => (
       getPathKey(note.path) === activePathKey
         ? {
             ...note,
-            title: openedNoteTitle || note.title,
-            content: value,
+            title: openedNoteTitleRef.current || note.title,
+            content: valueRef.current,
             styles: currentStyles,
-            tables: structuredTables
+            tables: structuredTablesRef.current
           }
         : note
-    )));
-  }, [openedNotePath, openedNoteTitle, structuredTables, value]);
+    ));
+    openedNotesRef.current = nextNotes;
+    setOpenedNotes(nextNotes);
+    return nextNotes;
+  }, []);
 
   const activateOpenedNote = useCallback((path: string) => {
     const targetPathKey = getPathKey(path);
-    const targetNote = openedNotes.find((note) => getPathKey(note.path) === targetPathKey);
 
-    if (!targetNote) {
-      return;
-    }
-
-    if (getPathKey(openedNotePath ?? "") === targetPathKey) {
+    if (getPathKey(openedNotePathRef.current ?? "") === targetPathKey) {
       setShowLogoPane(false);
       setShowCommands(false);
       setCommandQuery("");
       return;
     }
 
-    cacheCurrentOpenedNote();
+    const cachedNotes = cacheCurrentOpenedNote();
+    const targetNote = cachedNotes.find((note) => getPathKey(note.path) === targetPathKey);
+    if (!targetNote) {
+      return;
+    }
+
     openLoadedX2Note(targetNote);
-  }, [cacheCurrentOpenedNote, openLoadedX2Note, openedNotePath, openedNotes]);
+  }, [cacheCurrentOpenedNote, openLoadedX2Note]);
 
   const openLoadedX2Folder = useCallback((folder: LoadedX2Folder) => {
     const activePathKey = getPathKey(folder.activePath);
@@ -3648,6 +3683,10 @@ function Editor() {
       ?? folder.notes[0];
 
     if (!activeNote) {
+      openedNotesRef.current = [];
+      openedNoteTitleRef.current = null;
+      openedNotePathRef.current = null;
+      valueRef.current = "";
       setOpenedNotes([]);
       setOpenedNoteTitle(null);
       setOpenedNotePath(null);
@@ -3668,6 +3707,7 @@ function Editor() {
       return;
     }
 
+    openedNotesRef.current = folder.notes;
     setOpenedNotes(folder.notes);
     openLoadedX2Note(activeNote);
     setFileStatus(`Opened ${folder.notes.length} note${folder.notes.length === 1 ? "" : "s"} from folder.`);
@@ -3796,6 +3836,8 @@ function Editor() {
 
     structuredTablesRef.current = nextTables;
     setStructuredTables(nextTables);
+    pendingOpenedContentRef.current = null;
+    setTableRenderRevision((revision) => revision + 1);
     const updatedTable = nextTables.find((table) => table.id === tableId);
     if (updatedTable) {
       requestAnimationFrame(() => syncStructuredTableFormulaDisplays(updatedTable));
@@ -4106,7 +4148,6 @@ function Editor() {
           styles: []
         };
       });
-      setTableRenderRevision((revision) => revision + 1);
       navigateStructuredTableCell(
         { tableId, rowIndex, columnIndex },
         `Formula result ${result}.`
@@ -4151,11 +4192,131 @@ function Editor() {
           : shiftedStyles
       };
     });
-    setTableRenderRevision((revision) => revision + 1);
     moveStructuredTableCell({ tableId, rowIndex, columnIndex });
     setFileStatus(`Applied //${commandName} in table cell.`);
     setFileStatusKind("success");
   }, [getCellStyleForCommand, moveStructuredTableCell, navigateStructuredTableCell, updateStructuredCell]);
+
+  const saveX2NoteQueued = useCallback((path: string, note: {
+    title: string;
+    content: string;
+    styles: TextStyleRange[];
+    tables: StructuredTable[];
+    codeOutputs?: Array<Omit<CodeBoxOutput, "runId">>;
+  }) => {
+    const pathKey = getPathKey(path);
+    const previousSave = noteSaveQueuesRef.current.get(pathKey) ?? Promise.resolve();
+    const queuedSave = previousSave
+      .catch(() => undefined)
+      .then(async () => {
+        await invoke("save_x2_note", { path, note });
+      });
+
+    noteSaveQueuesRef.current.set(pathKey, queuedSave);
+    void queuedSave.then(
+      () => {
+        if (noteSaveQueuesRef.current.get(pathKey) === queuedSave) {
+          noteSaveQueuesRef.current.delete(pathKey);
+        }
+      },
+      () => {
+        if (noteSaveQueuesRef.current.get(pathKey) === queuedSave) {
+          noteSaveQueuesRef.current.delete(pathKey);
+        }
+      }
+    );
+    return queuedSave;
+  }, []);
+
+  const cancelPendingAutoSave = useCallback((path: string) => {
+    const pathKey = getPathKey(path);
+    const timer = autoSaveTimersRef.current.get(pathKey);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      autoSaveTimersRef.current.delete(pathKey);
+    }
+    autoSaveVersionsRef.current.set(pathKey, (autoSaveVersionsRef.current.get(pathKey) ?? 0) + 1);
+  }, []);
+
+  const scheduleAutoSave = useCallback(() => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+
+    const path = openedNotePathRef.current;
+    if (!path) {
+      return;
+    }
+
+    const pathKey = getPathKey(path);
+    const previousTimer = autoSaveTimersRef.current.get(pathKey);
+    if (previousTimer !== undefined) {
+      window.clearTimeout(previousTimer);
+    }
+
+    const version = (autoSaveVersionsRef.current.get(pathKey) ?? 0) + 1;
+    autoSaveVersionsRef.current.set(pathKey, version);
+    setFileStatus("Unsaved changes — auto-save pending...");
+    setFileStatusKind("idle");
+
+    const timer = window.setTimeout(() => {
+      autoSaveTimersRef.current.delete(pathKey);
+      if (autoSaveVersionsRef.current.get(pathKey) !== version) {
+        return;
+      }
+
+      const isCurrentNote = getPathKey(openedNotePathRef.current ?? "") === pathKey;
+      const noteInCache = openedNotesRef.current.find((note) => getPathKey(note.path) === pathKey);
+      if (!noteInCache) {
+        return;
+      }
+
+      const savedAt = new Date().toISOString();
+      const note = {
+        title: isCurrentNote ? (openedNoteTitleRef.current || noteInCache.title) : noteInCache.title,
+        content: isCurrentNote ? valueRef.current : noteInCache.content,
+        styles: (isCurrentNote ? styleRangesRef.current : (noteInCache.styles ?? [])).map((range) => ({
+          ...range,
+          style: { ...range.style }
+        })),
+        tables: normalizeStructuredTables(isCurrentNote ? structuredTablesRef.current : (noteInCache.tables ?? []))
+      };
+
+      if (isCurrentNote) {
+        setFileStatus("Auto-saving...");
+        setFileStatusKind("idle");
+      }
+
+      void saveX2NoteQueued(path, note).then(() => {
+        if (!isEditorMountedRef.current || autoSaveVersionsRef.current.get(pathKey) !== version) {
+          return;
+        }
+
+        const savedNote: LoadedX2Note = { ...note, path, savedAt };
+        const nextNotes = openedNotesRef.current.map((currentNote) => (
+          getPathKey(currentNote.path) === pathKey ? savedNote : currentNote
+        ));
+        openedNotesRef.current = nextNotes;
+        setOpenedNotes(nextNotes);
+
+        if (getPathKey(openedNotePathRef.current ?? "") === pathKey) {
+          setFileStatus("Auto-saved.");
+          setFileStatusKind("success");
+        }
+      }).catch((error) => {
+        if (
+          isEditorMountedRef.current &&
+          autoSaveVersionsRef.current.get(pathKey) === version &&
+          getPathKey(openedNotePathRef.current ?? "") === pathKey
+        ) {
+          setFileStatus(`Auto-save failed: ${String(error)}`);
+          setFileStatusKind("error");
+        }
+      });
+    }, AUTO_SAVE_DELAY_MS);
+
+    autoSaveTimersRef.current.set(pathKey, timer);
+  }, [saveX2NoteQueued]);
 
   const runFileCommand = useCallback(async (
     commandName: "save" | "new" | "export",
@@ -4259,7 +4420,8 @@ function Editor() {
       setFileStatusKind("idle");
 
       if (isSaveCommand) {
-        await invoke("save_x2_note", { path: outputPath, note });
+        cancelPendingAutoSave(outputPath);
+        await saveX2NoteQueued(outputPath, note);
         const savedTitle = title || "Untitled Note";
         const savedPathKey = getPathKey(outputPath);
         const savedNote: LoadedX2Note = {
@@ -4271,19 +4433,18 @@ function Editor() {
           tables
         };
 
-        setOpenedNotes((currentNotes) => {
-          const existingIndex = currentNotes.findIndex((currentNote) => (
-            getPathKey(currentNote.path) === savedPathKey
-          ));
-
-          if (existingIndex < 0) {
-            return [...currentNotes, savedNote];
-          }
-
-          return currentNotes.map((currentNote, index) => (
-            index === existingIndex ? savedNote : currentNote
-          ));
-        });
+        const existingIndex = openedNotesRef.current.findIndex((currentNote) => (
+          getPathKey(currentNote.path) === savedPathKey
+        ));
+        const nextOpenedNotes = existingIndex < 0
+          ? [...openedNotesRef.current, savedNote]
+          : openedNotesRef.current.map((currentNote, index) => (
+              index === existingIndex ? savedNote : currentNote
+            ));
+        openedNotesRef.current = nextOpenedNotes;
+        openedNoteTitleRef.current = savedTitle;
+        openedNotePathRef.current = outputPath;
+        setOpenedNotes(nextOpenedNotes);
         setOpenedNoteTitle(savedTitle);
         setOpenedNotePath(outputPath);
         setFileStatus(`Saved .x2 file (${styles.length} style ${styles.length === 1 ? "range" : "ranges"}).`);
@@ -4297,7 +4458,7 @@ function Editor() {
       setFileStatus(String(error));
       setFileStatusKind("error");
     }
-  }, [codeRuns, openLoadedX2Folder]);
+  }, [cancelPendingAutoSave, codeRuns, openLoadedX2Folder, saveX2NoteQueued]);
 
   const createNewNote = useCallback(() => {
     const currentStyles = styleRangesRef.current.map((range) => ({
@@ -4841,6 +5002,9 @@ function Editor() {
       }
     }),
     EditorView.lineWrapping,
+    scrollPastEnd(),
+    editorCursorScrollMargin,
+    keepEditorCursorInView,
     textStyleDecorations,
     commandLineDecorations,
     structuredTableDecorations(structuredTablesRef),
@@ -5113,7 +5277,21 @@ function Editor() {
   ]);
 
   const onChange = useCallback((val: string, viewUpdate: any) => {
+    const eventPathKey = getPathKey(openedNotePath ?? "");
+    if (!eventPathKey || eventPathKey !== getPathKey(openedNotePathRef.current ?? "")) {
+      return;
+    }
+
+    valueRef.current = val;
     setValue(val);
+    const openedContent = pendingOpenedContentRef.current;
+    const activePathKey = getPathKey(openedNotePathRef.current ?? "");
+    if (openedContent?.pathKey === activePathKey && openedContent.content === val) {
+      pendingOpenedContentRef.current = null;
+    } else {
+      pendingOpenedContentRef.current = null;
+      scheduleAutoSave();
+    }
 
     const state = viewUpdate.state;
     const cursor = state.selection.main.head;
@@ -5148,7 +5326,21 @@ function Editor() {
       setCommandQuery("");
       setSelectedCommandIndex(0);
     }
-  }, []);
+  }, [openedNotePath, scheduleAutoSave]);
+
+  useEffect(() => {
+    if (tableRenderRevision === 0) {
+      return;
+    }
+
+    const openedContent = pendingOpenedContentRef.current;
+    const activePathKey = getPathKey(openedNotePathRef.current ?? "");
+    if (openedContent?.pathKey === activePathKey && openedContent.content === valueRef.current) {
+      return;
+    }
+
+    scheduleAutoSave();
+  }, [scheduleAutoSave, tableRenderRevision]);
 
   const styleIndicator = [
     selectedFont,
@@ -5211,6 +5403,7 @@ function Editor() {
     }
 
     if (nextSelection === 1) {
+      setShowLogoPane(true);
       return;
     }
 
@@ -5230,6 +5423,15 @@ function Editor() {
 
   useEffect(() => {
     sidebarRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    isEditorMountedRef.current = true;
+    return () => {
+      isEditorMountedRef.current = false;
+      autoSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      autoSaveTimersRef.current.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -5837,7 +6039,12 @@ function Editor() {
             <button
               type="button"
               className={`note-link new-note-link ${sidebarSelection === 1 ? "active" : ""}`}
-              onFocus={() => setSidebarSelection(1)}
+              onFocus={() => {
+                setSidebarSelection(1);
+                setShowLogoPane(true);
+                setShowCommands(false);
+                setCommandQuery("");
+              }}
               onClick={createNewNote}
             >
               <span className="note-link-title">+ New note</span>
@@ -5853,12 +6060,11 @@ function Editor() {
             {filteredNotes.map((note, index) => {
               const selectionIndex = index + 2;
               const isSelected = sidebarSelection === selectionIndex;
-              const isActive = getPathKey(openedNotePath ?? "") === getPathKey(note.path) && !showLogoPane;
 
               return (
                 <button
                   type="button"
-                  className={`note-link ${isSelected || isActive ? "active" : ""}`}
+                  className={`note-link ${isSelected ? "active" : ""}`}
                   key={note.path}
                   title={note.path}
                   onFocus={() => {
@@ -5899,6 +6105,8 @@ function Editor() {
               </div>
             ) : (
               <CodeMirror
+                key={openedNotePath ?? "empty-note"}
+                className="note-editor"
                 value={value}
                 height="100%"
                 theme="dark"
