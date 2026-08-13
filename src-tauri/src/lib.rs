@@ -1521,24 +1521,27 @@ fn write_pdf_table(
 ) {
     let column_count = table.columns.len().max(1);
     let column_width = PDF_BODY_MAX_WIDTH_MM / column_count as f32;
-    let header_cells = table
-        .columns
-        .iter()
-        .map(|column| X2TableCell {
-            text: column.clone(),
-            formula: None,
-            styles: vec![TextStyleRange {
-                from: 0,
-                to: column.chars().map(char::len_utf16).sum(),
-                style: TextStyle {
-                    is_bold: true,
-                    ..TextStyle::default()
-                },
-            }],
-            active_style: None,
-        })
-        .collect::<Vec<_>>();
-    let header_layout = layout_pdf_table_row(&header_cells, column_width, column_count);
+    let header_layout = has_pdf_table_header(table).then(|| {
+        let header_cells = table
+            .columns
+            .iter()
+            .map(|column| X2TableCell {
+                text: column.clone(),
+                formula: None,
+                styles: vec![TextStyleRange {
+                    from: 0,
+                    to: column.chars().map(char::len_utf16).sum(),
+                    style: TextStyle {
+                        is_bold: true,
+                        ..TextStyle::default()
+                    },
+                }],
+                active_style: None,
+            })
+            .collect::<Vec<_>>();
+
+        layout_pdf_table_row(&header_cells, column_width, column_count)
+    });
     let row_layouts = table
         .rows
         .iter()
@@ -1546,32 +1549,27 @@ fn write_pdf_table(
         .collect::<Vec<_>>();
 
     *cursor_y -= 2.0;
-    let opening_height = header_layout.height
+    let opening_height = header_layout
+        .as_ref()
+        .map(|layout| layout.height)
+        .unwrap_or(0.0)
         + row_layouts
             .first()
             .map(|layout| layout.height)
             .unwrap_or(0.0);
     ensure_pdf_space(document, current_layer, cursor_y, opening_height);
-    draw_pdf_table_row(
-        current_layer,
-        *cursor_y,
-        column_width,
-        &header_layout,
-        fonts,
-    );
-    *cursor_y -= header_layout.height;
+    if let Some(header_layout) = &header_layout {
+        draw_pdf_table_row(current_layer, *cursor_y, column_width, header_layout, fonts);
+        *cursor_y -= header_layout.height;
+    }
 
     for row_layout in row_layouts {
         if !has_pdf_space(*cursor_y, row_layout.height) {
             add_pdf_page(document, current_layer, cursor_y);
-            draw_pdf_table_row(
-                current_layer,
-                *cursor_y,
-                column_width,
-                &header_layout,
-                fonts,
-            );
-            *cursor_y -= header_layout.height;
+            if let Some(header_layout) = &header_layout {
+                draw_pdf_table_row(current_layer, *cursor_y, column_width, header_layout, fonts);
+                *cursor_y -= header_layout.height;
+            }
         }
 
         draw_pdf_table_row(current_layer, *cursor_y, column_width, &row_layout, fonts);
@@ -1579,6 +1577,10 @@ fn write_pdf_table(
     }
 
     *cursor_y -= 3.0;
+}
+
+fn has_pdf_table_header(table: &X2Table) -> bool {
+    table.columns.iter().any(|column| !column.trim().is_empty())
 }
 
 struct PdfTableRowLayout {
@@ -2348,6 +2350,11 @@ mod feature_stress_tests {
 
     #[test]
     fn pdf_table_layout_keeps_all_wrapped_and_explicit_lines() {
+        let mut table = sample_table();
+        assert!(has_pdf_table_header(&table));
+        table.columns = vec![String::new(), "   ".to_string()];
+        assert!(!has_pdf_table_header(&table));
+
         let text =
             "First explicit line\nSecond line contains enough words to wrap across several lines";
         let cell = X2TableCell {

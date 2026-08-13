@@ -7,9 +7,7 @@ Poster: https://drive.google.com/file/d/1VN_jcvvfEWkB6IHPJKemCIk_EEEjQR7I/view?u
 
 Video: https://drive.google.com/file/d/1j2gtdw9_rOJNpFGhwHD4IRMjx4EUHTAt/view?usp=drive_link
 
-App Download: https://drive.google.com/file/d/13d55TByjsLx1_P4X6ghkMNUxHNb1Sr73/view?usp=drive_link
-
-User Guide: https://drive.google.com/file/d/1Lk3EA71SZVaiWFZ8eVLZcgR5WA8SdFdn/view?usp=drive_link
+App Download: https://drive.google.com/drive/folders/1kR_iZ3hcOT-K7Fqbukat9w7IYYLFSn2o?usp=drive_link
 
 # Motivation
 Modern note-taking apps often prioritise a "click-heavy" visual interface that disrupts the "flow state" of power users. For developers and students, the constant context-switching between the keyboard and mouse is an ergonomic bottleneck that slows down thought-to-text translation.
