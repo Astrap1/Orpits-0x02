@@ -635,7 +635,6 @@ function testEditorLogic(editor) {
     { from: 4, to: 6, style }
   ]);
 
-  // A deterministic high-volume pass catches range-order and numeric coercion regressions.
   for (let iteration = 0; iteration < 1000; iteration += 1) {
     const values = Array.from({ length: 25 }, (_, index) => ((iteration + index * 17) % 401) - 200);
     const table = {

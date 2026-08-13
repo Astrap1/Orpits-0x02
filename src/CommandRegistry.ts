@@ -119,7 +119,6 @@ const colorAliases = TEXT_COLOR_OPTIONS.reduce<Record<string, string>>((aliases,
   return aliases;
 }, {});
 
-// Central registry for all keyboard-driven actions
 export const CommandRegistry: Command[] = [
   {
     name: "title",

@@ -22,14 +22,12 @@ function ItemsList({ items, onSelectItem, onNavigateBack }: ItemsListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Focus input when creating
   useEffect(() => {
     if (isCreating && inputRef.current) {
       inputRef.current.focus();
     }
   }, [isCreating]);
 
-  // Scroll to keep selected item visible
   useEffect(() => {
     if (listRef.current) {
       const selectedElement = listRef.current.children[selectedIndex] as HTMLElement;
@@ -40,7 +38,6 @@ function ItemsList({ items, onSelectItem, onNavigateBack }: ItemsListProps) {
   }, [selectedIndex]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // If creating, handle input-specific keys
     if (isCreating) {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -56,7 +53,6 @@ function ItemsList({ items, onSelectItem, onNavigateBack }: ItemsListProps) {
       return;
     }
 
-    // Navigation keys
     switch (e.key) {
       case "ArrowUp":
         e.preventDefault();
@@ -85,7 +81,6 @@ function ItemsList({ items, onSelectItem, onNavigateBack }: ItemsListProps) {
         onNavigateBack();
         break;
       default:
-        // Check for Ctrl+N (new note) and Ctrl+Shift+N (new folder)
         if (e.ctrlKey) {
           if (e.key === "n") {
             e.preventDefault();
@@ -121,7 +116,6 @@ function ItemsList({ items, onSelectItem, onNavigateBack }: ItemsListProps) {
           />
         ))}
 
-        {/* Creating new item input */}
         {isCreating && (
           <div className="item-row creating-row">
             <div className="item-header">

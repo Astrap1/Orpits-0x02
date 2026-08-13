@@ -14,7 +14,6 @@ interface ItemRowProps {
   onHover: () => void;
 }
 
-// Function to convert date to relative time format
 function getRelativeTime(date: Date): string {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
@@ -32,7 +31,6 @@ function getRelativeTime(date: Date): string {
     return `${weeks}w ago`;
   }
 
-  // Format as "Mar 24" for older dates
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 

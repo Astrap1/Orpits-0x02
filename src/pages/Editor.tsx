@@ -3212,7 +3212,6 @@ function parseAiModelResponse(text: string): AiModelResponse {
       };
     }
   } catch {
-    // Fall back to treating the model text as the answer.
   }
 
   return {
@@ -4788,8 +4787,6 @@ function Editor() {
     const exactCommand = CommandRegistry.find(
       (registeredCommand) => registeredCommand.name.toLowerCase() === pendingCommand.name
     );
-    // A dropdown choice is more specific than the command text used to open
-    // the menu (for example, selecting `code c++` from a bare `//code`).
     const command = suggestedCommand ?? exactCommand;
 
     if (!command) {

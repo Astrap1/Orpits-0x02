@@ -12,17 +12,15 @@ interface FileSystemItem {
 function StartPage() {
   const navigate = useNavigate();
 
-  // Just one mock note for testing the design
   const mockItems: FileSystemItem[] = [
     {
       id: "sample-note",
       name: "Sample Note",
       type: "note",
-      lastEdited: new Date(Date.now() - 30 * 60 * 1000), // 30 minutes ago
+      lastEdited: new Date(Date.now() - 30 * 60 * 1000),
     },
   ];
 
-  // Sort items: folders first (alphabetically), then notes (by last edited, newest first)
   const sortedItems = [...mockItems].sort((a, b) => {
     if (a.type === "folder" && b.type === "note") return -1;
     if (a.type === "note" && b.type === "folder") return 1;
@@ -34,19 +32,16 @@ function StartPage() {
 
   return (
     <div className="start-page">
-      {/* Header */}
       <div className="start-page-header">
         <h1>x2pad</h1>
       </div>
 
-      {/* Search Bar */}
       <div className="search-bar-container">
         <div className="search-bar">
           <span className="search-icon">🔍</span>
           <input
             type="text"
             placeholder="Search notes (Ctrl + F)..."
-            // TODO: Add search functionality
           />
         </div>
       </div>
@@ -54,16 +49,11 @@ function StartPage() {
       <ItemsList
         items={sortedItems}
         onSelectItem={(item) => {
-          if (item.type === "folder") {
-            // TODO: Navigate to folder view
-          } else {
-            // Navigate to editor
+          if (item.type !== "folder") {
             navigate(`/editor/${item.id}`);
           }
         }}
-        onNavigateBack={() => {
-          // TODO: Go back to parent folder
-        }}
+        onNavigateBack={() => {}}
       />
 
       <footer className="start-page-footer">
